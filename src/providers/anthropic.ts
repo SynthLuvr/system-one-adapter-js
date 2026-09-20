@@ -4,7 +4,9 @@ import Anthropic, {
   APIError,
   APIUserAbortError,
 } from "@anthropic-ai/sdk";
+import type { MessageCreateParamsNonStreaming } from "@anthropic-ai/sdk/resources/messages/messages";
 import { TypeSafeError } from "@typesafe-ai/sdk";
+import { scope, type } from "arktype";
 import {
   providerErrorTranslator,
   translating,
@@ -15,6 +17,7 @@ import {
   type Provider,
   type ProviderRequestOptions,
   type ProviderResult,
+  parsePayload,
   recordRequest,
   recordResponse,
   systemPrompt,
@@ -43,29 +46,43 @@ const translateError = providerErrorTranslator({
   apiError: APIError,
 });
 
-/** One Messages API payload in the shape the provider reads. */
-interface MessagesPayload {
-  stop_reason: string | null;
-  content: { type: string; text?: string }[];
-  usage: { input_tokens: number; output_tokens: number };
-}
+/** Runtime validation of the Messages API payloads this provider reads. */
+const payloadTypes = scope({
+  ContentBlock: {
+    type: "string",
+    "text?": "string",
+  },
+  Usage: {
+    input_tokens: "number",
+    output_tokens: "number",
+  },
+  MessagesPayload: {
+    stop_reason: "string|null",
+    content: "ContentBlock[]",
+    usage: "Usage",
+  },
+}).export();
 
 /** Parse one Messages API payload, rejecting truncated output. */
-const anthropicResult = (response: MessagesPayload): ProviderResult => {
-  recordResponse(response, { finishReason: response.stop_reason });
-  if (response.stop_reason === "max_tokens")
+const anthropicResult = (response: unknown): ProviderResult => {
+  const payload = parsePayload(
+    () => payloadTypes.MessagesPayload(response),
+    "Anthropic response",
+  );
+  recordResponse(response, { finishReason: payload.stop_reason });
+  if (payload.stop_reason === "max_tokens")
     throw new TypeSafeError(
       "Anthropic response was truncated at the output token limit. " +
         "Increase max_tokens on AnthropicProvider, or request fewer questions.",
     );
-  const text = response.content
+  const text = payload.content
     .filter((block) => block.type === "text")
     .map((block) => block.text ?? "")
     .join("");
   return {
     text,
-    inputTokens: response.usage.input_tokens,
-    outputTokens: response.usage.output_tokens,
+    inputTokens: payload.usage.input_tokens,
+    outputTokens: payload.usage.output_tokens,
   };
 };
 
@@ -75,8 +92,8 @@ const requestParams = (
   messages: readonly Message[],
   options: ProviderRequestOptions,
   maxTokens: number,
-): Record<string, unknown> => {
-  const params: Record<string, unknown> = {
+): MessageCreateParamsNonStreaming => {
+  const params: MessageCreateParamsNonStreaming = {
     model: modelName,
     max_tokens: maxTokens,
     system: systemPrompt(messages),
@@ -96,8 +113,11 @@ class AnthropicProvider implements Provider {
   readonly client: Anthropic;
 
   constructor(modelName: string, options: AnthropicProviderOptions = {}) {
-    const maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
-    if (maxTokens <= 0) throw new Error("max_tokens must be > 0");
+    const maxTokens = type("number > 0")(
+      options.maxTokens ?? DEFAULT_MAX_TOKENS,
+    );
+    if (maxTokens instanceof type.errors)
+      throw new Error("max_tokens must be > 0");
     this.modelName = modelName;
     this.maxTokens = maxTokens;
     this.client = new Anthropic({
@@ -126,14 +146,12 @@ class AnthropicProvider implements Provider {
         this.maxTokens,
       );
       recordRequest(params, { api: "messages" });
-      const response = await this.client.messages.create(
-        params as unknown as Parameters<typeof this.client.messages.create>[0],
-      );
-      return anthropicResult(response as unknown as MessagesPayload);
+      const response = await this.client.messages.create(params);
+      return anthropicResult(response);
     }, translateError);
   }
 
-  /** Map an Anthropic SDK error to an SDK error. */
+  /** Map an exception from this provider's SDK to an SDK error. */
   translateError(error: unknown): TypeSafeError {
     return translateError(error);
   }

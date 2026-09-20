@@ -1,4 +1,5 @@
 import { TypeSafeError } from "@typesafe-ai/sdk";
+import { scope, type } from "arktype";
 import OpenAI, {
   APIConnectionError,
   APIConnectionTimeoutError,
@@ -6,7 +7,10 @@ import OpenAI, {
   APIUserAbortError,
 } from "openai";
 import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions";
-import type { ResponseCreateParamsNonStreaming } from "openai/resources/responses/responses.js";
+import type {
+  ResponseCreateParamsNonStreaming,
+  ResponseFormatTextConfig,
+} from "openai/resources/responses/responses.js";
 import {
   providerErrorTranslator,
   translating,
@@ -17,6 +21,7 @@ import {
   type Provider,
   type ProviderRequestOptions,
   type ProviderResult,
+  parsePayload,
   recordRequest,
   recordResponse,
   renderMessages,
@@ -46,6 +51,41 @@ const translateError = providerErrorTranslator({
   apiError: APIError,
 });
 
+/** Runtime validation of the API payloads this provider reads. */
+const payloadTypes = scope({
+  ResponsesError: {
+    "message?": "string",
+  },
+  IncompleteDetails: {
+    "reason?": "string",
+  },
+  ResponsesUsage: {
+    input_tokens: "number",
+    output_tokens: "number",
+  },
+  ResponsesPayload: {
+    status: "string",
+    "error?": "ResponsesError|null",
+    "incomplete_details?": "IncompleteDetails|null",
+    output_text: "string",
+    "usage?": "ResponsesUsage",
+  },
+  ChatChoice: {
+    message: {
+      content: "string|null",
+    },
+    finish_reason: "string|null",
+  },
+  ChatUsage: {
+    prompt_tokens: "number",
+    completion_tokens: "number",
+  },
+  ChatPayload: {
+    choices: "ChatChoice[]",
+    usage: "ChatUsage",
+  },
+}).export();
+
 /** The `response_format` for Chat Completions, or none when prompted. */
 const responseFormat = (
   options: ProviderRequestOptions,
@@ -62,8 +102,8 @@ const responsesRequest = (
   modelName: string,
   messages: readonly Message[],
   options: ProviderRequestOptions,
-): Record<string, unknown> => {
-  const format = options.structured
+): ResponseCreateParamsNonStreaming => {
+  const format: ResponseFormatTextConfig = options.structured
     ? {
         type: "json_schema",
         name: "evaluation",
@@ -71,7 +111,7 @@ const responsesRequest = (
         strict: true,
       }
     : { type: "json_object" };
-  const params: Record<string, unknown> = {
+  const params: ResponseCreateParamsNonStreaming = {
     model: modelName,
     input: renderMessages(messages),
     text: { format },
@@ -87,55 +127,60 @@ const responsesRequest = (
   return params;
 };
 
-/** One Responses API payload in the shape the provider reads. */
-interface ResponsesPayload {
-  status: string;
-  error?: { message?: string } | null;
-  incomplete_details?: { reason?: string } | null;
-  output_text: string;
-  usage: { input_tokens: number; output_tokens: number };
-}
-
 /** Parse one Responses API payload, rejecting unfinished responses. */
-const responsesResult = (response: ResponsesPayload): ProviderResult => {
-  recordResponse(response, { finishReason: response.status });
-  if (response.status !== "completed") {
-    let reason: string = response.status;
-    if (response.error !== null && response.error !== undefined)
-      reason = response.error.message ?? reason;
-    else if (
-      response.incomplete_details !== null &&
-      response.incomplete_details !== undefined
-    )
-      reason = response.incomplete_details.reason ?? reason;
+const responsesResult = (response: unknown): ProviderResult => {
+  const payload = parsePayload(
+    () => payloadTypes.ResponsesPayload(response),
+    "OpenAI response",
+  );
+  recordResponse(response, { finishReason: payload.status });
+  if (payload.status !== "completed") {
+    let reason: string = payload.status;
+    if (payload.error != null) reason = payload.error.message ?? reason;
+    else if (payload.incomplete_details != null)
+      reason = payload.incomplete_details.reason ?? reason;
     throw new TypeSafeError(`OpenAI response did not complete: ${reason}.`);
   }
+  const usage = parsePayload(
+    () => payloadTypes.ResponsesUsage(payload.usage),
+    "OpenAI response usage",
+  );
   return {
-    text: response.output_text,
-    inputTokens: response.usage.input_tokens,
-    outputTokens: response.usage.output_tokens,
+    text: payload.output_text,
+    inputTokens: usage.input_tokens,
+    outputTokens: usage.output_tokens,
   };
 };
 
-/** One Chat Completions payload in the shape the provider reads. */
-interface ChatCompletionPayload {
-  choices: {
-    message: { content: string | null };
-    finish_reason: string | null;
-  }[];
-  usage: { prompt_tokens: number; completion_tokens: number };
-}
-
 /** Parse one Chat Completions payload. */
-const chatResult = (response: ChatCompletionPayload): ProviderResult => {
-  recordResponse(response, {
-    finishReason: response.choices[0].finish_reason,
-  });
+const chatResult = (response: unknown): ProviderResult => {
+  const payload = parsePayload(
+    () => payloadTypes.ChatPayload(response),
+    "OpenAI chat completion",
+  );
+  const [choice] = payload.choices;
+  recordResponse(response, { finishReason: choice.finish_reason });
   return {
-    text: response.choices[0].message.content ?? "",
-    inputTokens: response.usage.prompt_tokens,
-    outputTokens: response.usage.completion_tokens,
+    text: choice.message.content ?? "",
+    inputTokens: payload.usage.prompt_tokens,
+    outputTokens: payload.usage.completion_tokens,
   };
+};
+
+/** Resolve the API option, defaulting by endpoint host. */
+const resolveApi = (
+  option: OpenAIApi | undefined,
+  baseURL: string,
+): OpenAIApi => {
+  if (option !== undefined) {
+    const api = type("'responses'|'chat_completions'")(option);
+    if (api instanceof type.errors)
+      throw new Error("api must be 'responses' or 'chat_completions'");
+    return api;
+  }
+  return new URL(baseURL).host === "api.openai.com"
+    ? "responses"
+    : "chat_completions";
 };
 
 /** Call the OpenAI Responses API or an OpenAI-compatible chat API. */
@@ -145,12 +190,6 @@ class OpenAIProvider implements Provider {
   readonly client: OpenAI;
 
   constructor(modelName: string, options: OpenAIProviderOptions = {}) {
-    if (
-      options.api !== undefined &&
-      options.api !== "responses" &&
-      options.api !== "chat_completions"
-    )
-      throw new Error("api must be 'responses' or 'chat_completions'");
     this.modelName = modelName;
     this.client = new OpenAI({
       baseURL: options.baseUrl,
@@ -158,11 +197,7 @@ class OpenAIProvider implements Provider {
       maxRetries: 0,
       fetch: options.fetch,
     });
-    this.api =
-      options.api ??
-      (new URL(this.client.baseURL).host === "api.openai.com"
-        ? "responses"
-        : "chat_completions");
+    this.api = resolveApi(options.api, this.client.baseURL);
   }
 
   /** No-op: this SDK version owns no connection pool to release. */
@@ -190,26 +225,22 @@ class OpenAIProvider implements Provider {
   ): Promise<ProviderResult> {
     const params = responsesRequest(this.modelName, messages, options);
     recordRequest(params, { api: this.api });
-    const response = await this.client.responses.create(
-      params as unknown as ResponseCreateParamsNonStreaming,
-    );
-    return responsesResult(response as unknown as ResponsesPayload);
+    const response = await this.client.responses.create(params);
+    return responsesResult(response);
   }
 
   async #requestChat(
     messages: readonly Message[],
     options: ProviderRequestOptions,
   ): Promise<ProviderResult> {
-    const params = {
+    const params: ChatCompletionCreateParamsNonStreaming = {
       model: this.modelName,
       messages: renderMessages(messages),
       response_format: responseFormat(options),
     };
     recordRequest(params, { api: this.api });
-    const response = await this.client.chat.completions.create(
-      params as unknown as ChatCompletionCreateParamsNonStreaming,
-    );
-    return chatResult(response as unknown as ChatCompletionPayload);
+    const response = await this.client.chat.completions.create(params);
+    return chatResult(response);
   }
 
   /** Map an OpenAI SDK error to an SDK error. */

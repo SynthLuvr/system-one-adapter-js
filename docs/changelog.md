@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- all runtime type validation now runs through `arktype`: question
+  collections, model output, provider response payloads, and constructor
+  options are validated with arktype schemas whose inferences replace
+  the previously hand-written guards
+- provider request parameters are built against the OpenAI and Anthropic
+  SDK parameter types directly, removing the unsafe casts that
+  previously bridged them
+- validated model answers flow into responses as typed SDK answer
+  shapes, so responses no longer rely on double casts; a single
+  documented assertion projects the validated answers onto the caller’s
+  inferred question types
+- test helpers validate recorded JSON via arktype as well, removing
+  `as never` and `as unknown as` assertions from the suite
+
 ## v0.3.0 (2026-09-20)
 
 ### Breaking Changes

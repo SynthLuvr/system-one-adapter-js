@@ -1,3 +1,5 @@
+import type { ValidatedAnswer } from "../schema.js";
+
 const PROBABILITY_TOLERANCE = 1e-6;
 
 /** How the LLM is asked to answer: per-label distributions or one value. */
@@ -13,12 +15,24 @@ interface ProbabilityNormalization {
   originalProbabilities?: Record<string, number>;
 }
 
+/** Probability diagnostics attached to adapter responses and errors. */
+type ProbabilityDebug = {
+  /** Largest absolute distance of an original probability sum from one. */
+  max_error: number;
+  /** Number of questions whose probability sum deviated from one. */
+  invalid_probs: number;
+  /** Absolute distance of each deviating question's sum from one. */
+  probability_errors: Record<string, number>;
+  /** Original distributions that normalization changed. */
+  original_probabilities?: Record<string, Record<string, number>>;
+};
+
 /** Build probability diagnostics from question normalization results. */
 const probabilityDebugData = (
   probabilityNormalizations: Readonly<
     Record<string, ProbabilityNormalization | undefined>
   >,
-): Record<string, unknown> => {
+): ProbabilityDebug => {
   const errors: Record<string, number> = {};
   for (const [questionId, normalization] of Object.entries(
     probabilityNormalizations,
@@ -36,7 +50,7 @@ const probabilityDebugData = (
     if (normalization?.originalProbabilities !== undefined)
       originalProbabilities[questionId] = normalization.originalProbabilities;
 
-  const debugData: Record<string, unknown> = {
+  const debugData: ProbabilityDebug = {
     max_error: Math.max(0, ...Object.values(errors)),
     invalid_probs: Object.keys(probabilityErrors).length,
     probability_errors: probabilityErrors,
@@ -66,11 +80,11 @@ const rescaleProbabilities = (
 /** Build and optionally normalize one answer's probability distribution. */
 const normalizeAnswerProbabilities = (
   labels: readonly string[],
-  value: unknown,
-  answerMode: AnswerMode,
+  value: ValidatedAnswer,
   { enabled }: { enabled: boolean },
 ): ProbabilityNormalization => {
-  if (answerMode === "discrete") {
+  if (typeof value !== "object") {
+    // Discrete answers carry the selected boolean, integer, or label.
     const selected = String(value);
     const probabilities = Object.fromEntries(
       labels.map((label) => [label, label === selected ? 1 : 0]),
@@ -78,9 +92,8 @@ const normalizeAnswerProbabilities = (
     return { probabilities, error: 0 };
   }
 
-  const record = value as Record<string, unknown>;
   const originalProbabilities = Object.fromEntries(
-    labels.map((label) => [label, Number(record[label])]),
+    labels.map((label) => [label, value[label]]),
   );
   const total = Object.values(originalProbabilities).reduce(
     (sum, probability) => sum + probability,
@@ -100,6 +113,7 @@ const normalizeAnswerProbabilities = (
 export {
   type AnswerMode,
   normalizeAnswerProbabilities,
+  type ProbabilityDebug,
   type ProbabilityNormalization,
   probabilityDebugData,
   rescaleProbabilities,

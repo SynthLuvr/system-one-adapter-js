@@ -1,4 +1,9 @@
-import { APIError, type Questions, TypeSafeError } from "@typesafe-ai/sdk";
+import {
+  APIError,
+  InternalServerError,
+  type Questions,
+  TypeSafeError,
+} from "@typesafe-ai/sdk";
 import { describe, expect, it } from "vitest";
 import {
   SystemOneAdapterClient,
@@ -15,6 +20,7 @@ import {
   type RecordedEndpoint,
   server,
 } from "./msw.js";
+import { asRecord, asRecords, asString, debugOf } from "./testRecords.js";
 
 const STATE = "This is a delightful fiction novel.";
 const QUESTIONS = {
@@ -211,22 +217,24 @@ describe("client integration over the OpenAI Responses API", () => {
       retry: { maxRetries: 2, backoffInitialMs: 1, backoffJitter: 0 },
     });
 
-    const error = (await client
+    const error = await client
       .systemOne({
         state: "state",
         questions: { answer: QUESTIONS.positive },
         model: responsesProvider(),
       })
-      .catch((caught: unknown) => caught)) as APIError & RaisedError;
+      .catch((caught: unknown) => caught);
 
     expect(error).toBeInstanceOf(APIError);
+    if (!(error instanceof APIError)) throw new Error("expected an APIError");
     expect(error.status).toBe(503);
-    expect(error.name).toBe("InternalServerError");
-    expect(error.debug?.retry_reasons.map(([category]) => category)).toEqual([
+    expect(error).toBeInstanceOf(InternalServerError);
+    const debug = debugOf(error);
+    expect(asRecords(debug.retry_reasons).map((reason) => reason[0])).toEqual([
       "provider_error",
       "provider_error",
     ]);
-    expect(() => JSON.stringify(error.debug)).not.toThrow();
+    expect(() => JSON.stringify(debug)).not.toThrow();
   });
 
   it.each([
@@ -251,25 +259,32 @@ describe("client integration over the OpenAI Responses API", () => {
           questions: { answer: QUESTIONS.positive },
           model: responsesProvider(),
         })
-        .catch((caught: unknown) => caught)) as RaisedError;
+        .catch((caught: unknown) => caught)) as APIError;
 
       expect(endpoint.requests.length).toBe(nRetryMalformedStructure + 1);
-      const debug = error.debug;
-      expect(debug?.retry_reasons.map(([category]) => category)).toEqual(
+      const debug = debugOf(error);
+      const retryReasons = asRecords(debug.retry_reasons);
+      expect(retryReasons.map((reason) => reason[0])).toEqual(
         Array<string>(nRetryMalformedStructure).fill("malformed_structure"),
       );
       expect(error.cause).toBeInstanceOf(OutputValidationError);
-      expect(error.cause?.message).toContain(errorFragment);
-      for (const [, message] of debug?.retry_reasons ?? [])
-        expect(message).toContain(errorFragment);
-      const attempts = debug?.llm_attempts ?? [];
+      const cause = error.cause;
+      if (!(cause instanceof Error)) throw new Error("expected a cause");
+      expect(cause.message).toContain(errorFragment);
+      for (const reason of retryReasons)
+        expect(String(reason[1])).toContain(errorFragment);
+      const attempts = asRecords(debug.llm_attempts);
       expect(attempts.length).toBe(nRetryMalformedStructure + 1);
-      expect(attempts.map((attempt) => attempt.messages.length)).toEqual(
+      expect(
+        attempts.map((attempt) => asRecords(attempt.messages).length),
+      ).toEqual(
         Array.from({ length: attempts.length }, (_, index) => 2 * index + 2),
       );
       for (const attempt of attempts) {
-        const message = attempt.llm_response?.output[0].content[0].text;
-        expect(message).toBe(malformedText);
+        const llmResponse = asRecord(attempt.llm_response);
+        const output = asRecords(llmResponse.output);
+        const content = asRecords(output[0].content);
+        expect(asString(content[0].text)).toBe(malformedText);
       }
       expect(() => JSON.stringify(debug)).not.toThrow();
     },
