@@ -12,6 +12,11 @@ import {
   score,
   TypeSafeError,
 } from "../index.js";
+import {
+  openAIResponsesEndpoint,
+  openAIResponsesPayload,
+  server,
+} from "./msw.js";
 
 // Provider SDKs demand a key when the client is built, before any HTTP happens.
 process.env.OPENAI_API_KEY ??= "public-api-test";
@@ -56,29 +61,23 @@ describe("public API", () => {
   });
 
   it("exposes a provider seam compatible with the client", async () => {
-    const provider = {
-      modelName: "fake-model",
-      async request() {
-        return {
-          text: '{"answers":{"positive":0.75}}',
-          inputTokens: 1,
-          outputTokens: 1,
-        };
-      },
-      translateError(error: unknown) {
-        return new TypeSafeError(String(error));
-      },
-    };
+    const endpoint = openAIResponsesEndpoint(() =>
+      openAIResponsesPayload('{"answers":{"positive":0.75}}'),
+    );
+    server.use(endpoint.handler);
+    const provider = buildProvider("openai", "test-model");
     const client = new SystemOneAdapterClient({
       structuredOutputs: true,
       llmAnswerMode: "probabilities",
+      provider: "openai",
+      model: provider,
     });
     const response = await client.systemOne({
       state: "A lovely book.",
       questions: { positive: noul("The review is positive.") },
-      model: provider,
     });
     expect(response.nouls.positive?.noul).toBe(0.75);
+    expect(endpoint.requests.length).toBe(1);
     await client.close();
   });
 });

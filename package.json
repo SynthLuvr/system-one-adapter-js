@@ -24,6 +24,7 @@
   "devDependencies": {
     "@types/node": "^26.4.1",
     "@vitest/coverage-v8": "^5.0.0",
+    "msw": "^2.15.0",
     "ts-canon": "^0.1.5",
     "typescript": "^7.0.2",
     "vitest": "^5.0.0"
