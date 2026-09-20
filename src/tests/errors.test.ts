@@ -18,19 +18,17 @@ import {
   AnthropicProvider,
   translateAnthropicError,
 } from "../providers/anthropic.js";
+import type { Provider } from "../providers/index.js";
 import { OpenAIProvider, translateOpenAIError } from "../providers/openai.js";
 import {
+  ANSWER,
   anthropicEndpoint,
   jsonResponseError,
   openAIResponsesEndpoint,
   openAIResponsesPayload,
+  QUESTIONS,
   server,
 } from "./msw.js";
-
-const QUESTIONS = {
-  positive: { type: "noul", instructions: "The review is positive." },
-} as const;
-const ANSWER = '{"answers":{"positive":true}}';
 
 const STATUS_CASES = [
   { status: 400, expected: BadRequestError },
@@ -44,11 +42,13 @@ const STATUS_CASES = [
 const PROVIDERS = [
   {
     provider: "openai",
-    build: (baseUrl?: string) =>
-      new OpenAIProvider("test-model", {
-        apiKey: "test-key",
-        ...(baseUrl === undefined ? {} : { baseUrl, api: "chat_completions" }),
-      }) as never,
+    build: (baseUrl?: string): Provider =>
+      new OpenAIProvider(
+        "test-model",
+        baseUrl === undefined
+          ? { apiKey: "test-key" }
+          : { apiKey: "test-key", baseUrl, api: "chat_completions" },
+      ),
     endpoint: openAIResponsesEndpoint,
     translate: translateOpenAIError,
     timeoutError: () => new openai.APIConnectionTimeoutError(),
@@ -64,11 +64,13 @@ const PROVIDERS = [
   },
   {
     provider: "anthropic",
-    build: (baseUrl?: string) =>
-      new AnthropicProvider("test-model", {
-        apiKey: "test-key",
-        ...(baseUrl === undefined ? {} : { baseUrl }),
-      }) as never,
+    build: (baseUrl?: string): Provider =>
+      new AnthropicProvider(
+        "test-model",
+        baseUrl === undefined
+          ? { apiKey: "test-key" }
+          : { apiKey: "test-key", baseUrl },
+      ),
     endpoint: anthropicEndpoint,
     translate: translateAnthropicError,
     timeoutError: () => new anthropic.APIConnectionTimeoutError(),
@@ -130,7 +132,9 @@ describe("provider error translation over HTTP", () => {
 
   it("keeps provider errors distinguishable on the debug trace", async () => {
     const endpoint = openAIResponsesEndpoint((_body, index) =>
-      index === 0 ? jsonResponseError(503) : openAIResponsesPayload(ANSWER),
+      index === 0
+        ? jsonResponseError(503)
+        : openAIResponsesPayload(ANSWER({ positive: true })),
     );
     server.use(endpoint.handler);
     const response = await new SystemOneAdapterClient({
@@ -173,9 +177,7 @@ describe("provider error translators", () => {
       expect(translate(alreadyMapped)).toBe(alreadyMapped);
 
       // The same mapping is exposed as a method on every provider instance.
-      const provider = build() as unknown as {
-        translateError: (error: unknown) => TypeSafeError;
-      };
+      const provider = build();
       expect(provider.translateError(timeoutError())).toBeInstanceOf(
         APITimeoutError,
       );

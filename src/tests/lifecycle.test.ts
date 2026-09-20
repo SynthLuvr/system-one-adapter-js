@@ -11,24 +11,22 @@ import type {
 } from "../providers/index.js";
 import { OpenAIProvider } from "../providers/openai.js";
 import {
+  ANSWER,
   anthropicEndpoint,
   anthropicPayload,
   jsonResponseError,
   openAIResponsesEndpoint,
   openAIResponsesPayload,
+  QUESTIONS,
   server,
 } from "./msw.js";
 
-const QUESTIONS = {
-  positive: { type: "noul", instructions: "The review is positive." },
-} as const;
-const ANSWER = '{"answers":{"positive":true}}';
-
 /** Serve every OpenAI and Anthropic request with a valid discrete answer. */
 const serveAnswers = (): void => {
+  const answer = ANSWER({ positive: true });
   server.use(
-    openAIResponsesEndpoint(() => openAIResponsesPayload(ANSWER)).handler,
-    anthropicEndpoint(() => anthropicPayload(ANSWER)).handler,
+    openAIResponsesEndpoint(() => openAIResponsesPayload(answer)).handler,
+    anthropicEndpoint(() => anthropicPayload(answer)).handler,
   );
 };
 
@@ -99,14 +97,12 @@ class ScriptedProviderClient extends SystemOneAdapterClient {
       provider: ProviderName,
       model: string,
     ) => Provider & Partial<ClosableProvider>)[],
-    options: Record<string, unknown> = {},
   ) {
     super({
       structuredOutputs: true,
       llmAnswerMode: "discrete",
       provider: "openai",
-      ...options,
-    } as never);
+    });
     this.#factories = factories;
   }
 
@@ -131,14 +127,8 @@ const liveProvider = (
     : new AnthropicProvider(model, { apiKey: "test-key" });
 
 /** A scripted client with `n` fresh live providers, in build order. */
-const clientWithProviders = (
-  n: number,
-  options: Record<string, unknown> = {},
-): ScriptedProviderClient =>
-  new ScriptedProviderClient(
-    Array.from({ length: n }, () => liveProvider),
-    options,
-  );
+const clientWithProviders = (n: number): ScriptedProviderClient =>
+  new ScriptedProviderClient(Array.from({ length: n }, () => liveProvider));
 
 describe("provider lifecycle", () => {
   it("reuses the owned provider and closes it on close", async () => {

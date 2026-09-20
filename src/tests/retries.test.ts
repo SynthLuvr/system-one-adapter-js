@@ -4,37 +4,29 @@ import { SystemOneAdapterClient } from "../client.js";
 import { AnthropicProvider } from "../providers/anthropic.js";
 import type { Provider } from "../providers/index.js";
 import { OpenAIProvider } from "../providers/openai.js";
+import { type AdapterDebug } from "../response.js";
 import {
+  ANSWER,
   anthropicEndpoint,
   jsonResponseError,
   openAIChatEndpoint,
   openAIResponsesEndpoint,
   openAIResponsesPayload,
+  QUESTIONS,
   server,
 } from "./msw.js";
 
-const QUESTIONS = {
-  positive: { type: "noul", instructions: "The review is positive." },
-} as const;
-const ANSWER = '{"answers":{"positive":true}}';
-
-/** A provider that always fails, with every served request recorded. */
+/** An endpoint and provider pair that always fails with a 503. */
 const failingProvider = (
   name: "openai" | "anthropic",
-  status = 503,
-  headers: Record<string, string> = {},
 ): {
   provider: Provider;
   requests: Record<string, unknown>[];
 } => {
   const endpoint =
     name === "openai"
-      ? openAIChatEndpoint(() =>
-          jsonResponseError(status, "unavailable", headers),
-        )
-      : anthropicEndpoint(() =>
-          jsonResponseError(status, "unavailable", headers),
-        );
+      ? openAIChatEndpoint(() => jsonResponseError(503))
+      : anthropicEndpoint(() => jsonResponseError(503));
   server.use(endpoint.handler);
   const provider =
     name === "openai"
@@ -72,17 +64,8 @@ describe("provider retry budgets", () => {
         .catch((caught: unknown) => caught as InternalServerError);
 
       expect(error).toBeInstanceOf(InternalServerError);
-      const debug = (
-        error as {
-          debug?: {
-            llm_attempts: {
-              request: unknown;
-              llm_response: unknown;
-              debug_info: { error_type?: string; error?: string };
-            }[];
-          };
-        }
-      ).debug;
+      const debug = (error as InternalServerError & { debug?: AdapterDebug })
+        .debug;
       const attempts = debug?.llm_attempts ?? [];
       expect(attempts.length).toBe(retryBudget + 1);
       expect(attempts.map((attempt) => attempt.request)).toEqual(requests);
@@ -110,7 +93,7 @@ describe("retry-after coordination", () => {
       const endpoint = openAIResponsesEndpoint((_body, index) =>
         index === 0
           ? jsonResponseError(429, "slow down", headers)
-          : openAIResponsesPayload(ANSWER),
+          : openAIResponsesPayload(ANSWER({ positive: true })),
       );
       server.use(endpoint.handler);
       const response = await new SystemOneAdapterClient({
@@ -130,7 +113,7 @@ describe("retry-after coordination", () => {
     const endpoint = openAIResponsesEndpoint((_body, index) =>
       index === 0
         ? jsonResponseError(429, "slow down", { "retry-after-ms": "999999" })
-        : openAIResponsesPayload(ANSWER),
+        : openAIResponsesPayload(ANSWER({ positive: true })),
     );
     server.use(endpoint.handler);
     const startedAt = performance.now();

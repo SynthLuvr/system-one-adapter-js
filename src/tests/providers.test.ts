@@ -2,24 +2,20 @@ import { TypeSafeError } from "@typesafe-ai/sdk";
 import { describe, expect, it } from "vitest";
 import { SystemOneAdapterClient } from "../client.js";
 import { AnthropicProvider } from "../providers/anthropic.js";
+import type { Message, ProviderRequestOptions } from "../providers/index.js";
 import { type OpenAIApi, OpenAIProvider } from "../providers/openai.js";
+import { type AdapterDebug } from "../response.js";
 import {
+  ANSWER,
   anthropicEndpoint,
   anthropicPayload,
   openAIChatEndpoint,
   openAIChatPayload,
   openAIResponsesEndpoint,
   openAIResponsesPayload,
+  QUESTIONS,
   server,
 } from "./msw.js";
-
-const QUESTIONS = {
-  positive: { type: "noul", instructions: "The review is positive." },
-} as const;
-const ANSWER = (answers: Record<string, unknown>): string =>
-  JSON.stringify({ answers });
-
-const noop = (): void => undefined;
 
 /** An OpenAI provider for one transport, built like production code would. */
 const openAIProvider = (
@@ -180,7 +176,7 @@ describe("openai transports", () => {
       const error = (await client
         .systemOne({ state: "A book.", questions: QUESTIONS })
         .catch((caught: unknown) => caught)) as TypeSafeError & {
-        debug?: { llm_attempts: { debug_info: Record<string, unknown> }[] };
+        debug?: AdapterDebug;
       };
 
       expect(error).toBeInstanceOf(TypeSafeError);
@@ -255,14 +251,11 @@ describe("openai transports", () => {
     "isolates concurrent attempts and preserves failed responses (%s)",
     async (firstStatus) => {
       let arrived = 0;
-      let release: () => void = noop;
-      const gate = new Promise<void>((resolve) => {
-        release = resolve;
-      });
+      const gate = Promise.withResolvers<void>();
       const endpoint = openAIResponsesEndpoint(async (body) => {
         arrived += 1;
-        if (arrived >= 2) release();
-        await gate;
+        if (arrived >= 2) gate.resolve();
+        await gate.promise;
         const document = (body.input as { content: string }[])[0].content;
         const status = document.includes("first document")
           ? firstStatus
@@ -326,16 +319,13 @@ describe("openai transports", () => {
       const before = JSON.stringify([first, second]);
       const attempt = (
         second.llm_attempts as {
-          messages: { role: string; content: string }[];
-          model_request_parameters: Record<string, unknown>;
+          messages: Message[];
+          model_request_parameters: ProviderRequestOptions;
         }[]
       )[0];
       await provider.request(
-        attempt.messages.map((message) => ({
-          ...message,
-          role: message.role as "system" | "user" | "assistant",
-        })),
-        attempt.model_request_parameters as never,
+        attempt.messages,
+        attempt.model_request_parameters,
       );
       expect(JSON.stringify([first, second])).toBe(before);
     },

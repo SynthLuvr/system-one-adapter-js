@@ -4,7 +4,7 @@ import { setupServer } from "msw/node";
 /** One recorded request body, parsed from JSON. */
 type RequestBody = Record<string, unknown>;
 
-/** A response an endpoint reply hands back to the caller. */
+/** A response an endpoint reply hands back; MSW's class is generic. */
 type ReplyResponse = InstanceType<typeof HttpResponse>;
 
 /** The reply for one request: a JSON payload or a ready-made response. */
@@ -125,7 +125,17 @@ const jsonResponseError = (
 ): ReplyResponse =>
   HttpResponse.json({ error: { message } }, { status, headers });
 
+/** Serialize `answers` into the JSON text a model returns. */
+const ANSWER = (answers: Record<string, unknown>): string =>
+  JSON.stringify({ answers });
+
+/** The minimal one-question request shared by most suites. */
+const QUESTIONS = {
+  positive: { type: "noul", instructions: "The review is positive." },
+} as const;
+
 export {
+  ANSWER,
   anthropicEndpoint,
   anthropicPayload,
   jsonResponseError,
@@ -133,6 +143,8 @@ export {
   openAIChatPayload,
   openAIResponsesEndpoint,
   openAIResponsesPayload,
+  QUESTIONS,
+  type RecordedEndpoint,
   type RequestBody,
   server,
 };

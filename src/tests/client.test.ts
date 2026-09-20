@@ -1,12 +1,18 @@
 import { APIError, type Questions, TypeSafeError } from "@typesafe-ai/sdk";
 import { describe, expect, it } from "vitest";
-import { SystemOneAdapterClient } from "../client.js";
+import {
+  SystemOneAdapterClient,
+  type SystemOneAdapterClientOptions,
+} from "../client.js";
 import { OpenAIProvider } from "../providers/openai.js";
 import { OutputValidationError } from "../schema.js";
+import type { AnswerMode } from "../utils/probabilityNormalization.js";
 import {
+  ANSWER,
   jsonResponseError,
   openAIResponsesEndpoint,
   openAIResponsesPayload,
+  type RecordedEndpoint,
   server,
 } from "./msw.js";
 
@@ -24,20 +30,28 @@ const QUESTIONS = {
     criteria: { fiction: "A story.", nonfiction: "Facts." },
   },
 } as const;
-const ANSWER = (answers: Record<string, unknown>): string =>
-  JSON.stringify({ answers });
 
-/** A provider pointed at the OpenAI Responses API through the real SDK. */
-const responsesProvider = (modelName = "test-model"): OpenAIProvider =>
-  new OpenAIProvider(modelName, { apiKey: "test-key" });
+/** A provider for the OpenAI Responses API. */
+const responsesProvider = (): OpenAIProvider =>
+  new OpenAIProvider("test-model", { apiKey: "test-key" });
 
 /** An endpoint whose replies repeat `texts` in order, holding the last. */
-const scriptedEndpoint = (
-  texts: readonly string[],
-): ReturnType<typeof openAIResponsesEndpoint> =>
+const scriptedEndpoint = (texts: readonly string[]): RecordedEndpoint =>
   openAIResponsesEndpoint((_body, index) =>
     openAIResponsesPayload(texts[Math.min(index, texts.length - 1)]),
   );
+
+/** A terminal adapter error, with its cause and attached debug payload. */
+interface RaisedError extends Error {
+  cause?: Error;
+  debug?: {
+    retry_reasons: [string, string][];
+    llm_attempts: {
+      messages: unknown[];
+      llm_response: { output: { content: { text: string }[] }[] } | null;
+    }[];
+  };
+}
 
 describe("client integration over the OpenAI Responses API", () => {
   it.each([
@@ -70,31 +84,11 @@ describe("client integration over the OpenAI Responses API", () => {
       llmAnswerMode: "probabilities",
     });
 
-    const response = (await client.systemOne({
+    const response = await client.systemOne({
       state: STATE,
-      questions: questions as Questions,
+      questions,
       model: responsesProvider(),
-    })) as unknown as {
-      nouls: Record<string, { noul: number } | undefined>;
-      scores: Record<
-        string,
-        | {
-            score: number;
-            legend: Record<string, string>;
-            probabilities: Record<string, number>;
-          }
-        | undefined
-      >;
-      choices: Record<string, { choice: string } | undefined>;
-      answers: Record<
-        string,
-        { probabilities?: Record<string, number> } | undefined
-      >;
-      toJSON: () => {
-        answers: Record<string, unknown>;
-        usage: { n_retries: number };
-      };
-    };
+    });
 
     expect(response.nouls.positive?.noul).toBe(0.8);
     expect(response.scores.stars?.score).toBe(0.75);
@@ -223,9 +217,7 @@ describe("client integration over the OpenAI Responses API", () => {
         questions: { answer: QUESTIONS.positive },
         model: responsesProvider(),
       })
-      .catch((caught: unknown) => caught)) as APIError & {
-      debug?: { retry_reasons: [string, string][] };
-    };
+      .catch((caught: unknown) => caught)) as APIError & RaisedError;
 
     expect(error).toBeInstanceOf(APIError);
     expect(error.status).toBe(503);
@@ -238,59 +230,48 @@ describe("client integration over the OpenAI Responses API", () => {
   });
 
   it.each([
-    ["missing answer", ANSWER({}), "missing required property"],
-    ["truncated json", '{"answers":', "invalid JSON"],
+    ["missing answer", ANSWER({}), "missing required property", 0],
+    ["missing answer", ANSWER({}), "missing required property", 2],
+    ["truncated json", '{"answers":', "invalid JSON", 0],
+    ["truncated json", '{"answers":', "invalid JSON", 2],
   ])(
-    "malformed retry exhaustion preserves debug (%s)",
-    async (_name, malformedText, errorFragment) => {
-      for (const nRetryMalformedStructure of [0, 2]) {
-        const endpoint = scriptedEndpoint([malformedText]);
-        server.use(endpoint.handler);
-        const client = new SystemOneAdapterClient({
-          structuredOutputs: true,
-          llmAnswerMode: "probabilities",
-          nRetryMalformedStructure,
-        });
+    "malformed retry exhaustion preserves debug (%s, budget %d)",
+    async (_name, malformedText, errorFragment, nRetryMalformedStructure) => {
+      const endpoint = scriptedEndpoint([malformedText]);
+      server.use(endpoint.handler);
+      const client = new SystemOneAdapterClient({
+        structuredOutputs: true,
+        llmAnswerMode: "probabilities",
+        nRetryMalformedStructure,
+      });
 
-        const error = (await client
-          .systemOne({
-            state: "state",
-            questions: { answer: QUESTIONS.positive },
-            model: responsesProvider(),
-          })
-          .catch((caught: unknown) => caught)) as Error & {
-          cause?: Error;
-          debug?: {
-            retry_reasons: [string, string][];
-            llm_attempts: {
-              messages: unknown[];
-              llm_response: {
-                output: { content: { text: string }[] }[];
-              } | null;
-            }[];
-          };
-        };
+      const error = (await client
+        .systemOne({
+          state: "state",
+          questions: { answer: QUESTIONS.positive },
+          model: responsesProvider(),
+        })
+        .catch((caught: unknown) => caught)) as RaisedError;
 
-        expect(endpoint.requests.length).toBe(nRetryMalformedStructure + 1);
-        const debug = error.debug;
-        expect(debug?.retry_reasons.map(([category]) => category)).toEqual(
-          Array<string>(nRetryMalformedStructure).fill("malformed_structure"),
-        );
-        expect(error.cause).toBeInstanceOf(OutputValidationError);
-        expect(error.cause?.message).toContain(errorFragment);
-        for (const [, message] of debug?.retry_reasons ?? [])
-          expect(message).toContain(errorFragment);
-        const attempts = debug?.llm_attempts ?? [];
-        expect(attempts.length).toBe(nRetryMalformedStructure + 1);
-        expect(attempts.map((attempt) => attempt.messages.length)).toEqual(
-          Array.from({ length: attempts.length }, (_, index) => 2 * index + 2),
-        );
-        for (const attempt of attempts) {
-          const message = attempt.llm_response?.output[0].content[0].text;
-          expect(message).toBe(malformedText);
-        }
-        expect(() => JSON.stringify(debug)).not.toThrow();
+      expect(endpoint.requests.length).toBe(nRetryMalformedStructure + 1);
+      const debug = error.debug;
+      expect(debug?.retry_reasons.map(([category]) => category)).toEqual(
+        Array<string>(nRetryMalformedStructure).fill("malformed_structure"),
+      );
+      expect(error.cause).toBeInstanceOf(OutputValidationError);
+      expect(error.cause?.message).toContain(errorFragment);
+      for (const [, message] of debug?.retry_reasons ?? [])
+        expect(message).toContain(errorFragment);
+      const attempts = debug?.llm_attempts ?? [];
+      expect(attempts.length).toBe(nRetryMalformedStructure + 1);
+      expect(attempts.map((attempt) => attempt.messages.length)).toEqual(
+        Array.from({ length: attempts.length }, (_, index) => 2 * index + 2),
+      );
+      for (const attempt of attempts) {
+        const message = attempt.llm_response?.output[0].content[0].text;
+        expect(message).toBe(malformedText);
       }
+      expect(() => JSON.stringify(debug)).not.toThrow();
     },
   );
 
@@ -536,18 +517,21 @@ describe("client integration over the OpenAI Responses API", () => {
   });
 
   it.each([
-    ["an invalid answer mode", { llmAnswerMode: "fuzzy" }],
+    ["an invalid answer mode", { llmAnswerMode: "fuzzy" as AnswerMode }],
     ["a negative malformed-structure budget", { nRetryMalformedStructure: -1 }],
-  ])("rejects %s at construction", (_name, options) => {
-    expect(
-      () =>
-        new SystemOneAdapterClient({
-          structuredOutputs: true,
-          llmAnswerMode: "discrete",
-          ...options,
-        } as never),
-    ).toThrow();
-  });
+  ] as [string, Partial<SystemOneAdapterClientOptions>][])(
+    "rejects %s at construction",
+    (_name, options) => {
+      expect(
+        () =>
+          new SystemOneAdapterClient({
+            structuredOutputs: true,
+            llmAnswerMode: "discrete",
+            ...options,
+          }),
+      ).toThrow();
+    },
+  );
 
   it("accepts a model answer wrapped in Markdown code fences", async () => {
     const fenced = "```json\n" + ANSWER({ answer: 0.75 }) + "\n```";
@@ -604,9 +588,7 @@ describe("client integration over the OpenAI Responses API", () => {
         questions: { answer: QUESTIONS.positive },
         model: responsesProvider(),
       })
-      .catch((caught: unknown) => caught)) as Error & {
-      debug?: Record<string, unknown>;
-    };
+      .catch((caught: unknown) => caught)) as RaisedError;
 
     expect(error).toBeInstanceOf(TypeSafeError);
     expect(error.message).toContain("max_output_tokens");
