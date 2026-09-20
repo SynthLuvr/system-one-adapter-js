@@ -1,0 +1,17 @@
+{
+  "options": {
+    "typeAware": true
+  },
+  "rules": {
+    "no-eval": "error",
+    "no-implied-eval": "error",
+    "no-new-func": "error",
+    "no-unsafe-finally": "error",
+    "no-unsafe-negation": "error",
+    "no-unsafe-optional-chaining": "error",
+    "no-unused-vars": ["error", { "args": "all", "argsIgnorePattern": "^_" }],
+    "typescript/no-floating-promises": "error",
+    "typescript/return-await": ["error", "in-try-catch"]
+  },
+  "ignorePatterns": ["**/*.js", "**/node_modules/**"]
+}
