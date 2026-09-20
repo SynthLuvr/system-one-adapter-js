@@ -2,6 +2,7 @@ import { TypeSafeError } from "@typesafe-ai/sdk";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SystemOneAdapterClient } from "../client.js";
 import {
+  type ClosableProvider,
   type Message,
   type Provider,
   type ProviderRequestOptions,
@@ -26,8 +27,8 @@ const makeProvider = (
     inputTokens: 11,
     outputTokens: 7,
   }),
-): Provider & { close: ReturnType<typeof vi.fn> } => {
-  const provider: Provider & { close: ReturnType<typeof vi.fn> } = {
+): ClosableProvider & { close: ReturnType<typeof vi.fn> } => {
+  const provider: ClosableProvider & { close: ReturnType<typeof vi.fn> } = {
     modelName: "test-model",
     async request(messages, options) {
       return respond(messages, options);
@@ -42,21 +43,21 @@ const makeProvider = (
 
 /** A client whose owned providers come from `providers` in order. */
 const clientWithProviders = (
-  providers: Provider[],
-  options: Record<string, unknown> = {},
+  providers: readonly (ClosableProvider & {
+    close: ReturnType<typeof vi.fn>;
+  })[],
 ): SystemOneAdapterClient => {
   const client = new SystemOneAdapterClient({
     structuredOutputs: true,
     llmAnswerMode: "discrete",
     provider: "openai",
-    ...options,
-  } as never);
+  });
   let index = 0;
   vi.spyOn(client, "buildProvider").mockImplementation(() => {
     const provider = providers[index];
     index += 1;
     if (provider === undefined) throw new Error("no provider scripted");
-    return provider as never;
+    return provider;
   });
   return client;
 };
@@ -154,7 +155,7 @@ describe("provider lifecycle", () => {
     await expect(
       client.systemOne({ state: "doc", questions: QUESTIONS, model: injected }),
     ).rejects.toThrow(/closed/);
-    await (injected.close as () => Promise<void>)();
+    await injected.close();
   });
 
   it("supports custom providers without close", async () => {
@@ -310,7 +311,7 @@ describe("provider lifecycle", () => {
     let provider: OpenAIProvider | undefined;
     vi.spyOn(client, "buildProvider").mockImplementation(() => {
       provider ??= new OpenAIProvider("test-model", { fetch: stubFetch });
-      return provider as never;
+      return provider;
     });
     await client.systemOne({
       state: "doc",
@@ -335,7 +336,7 @@ describe("provider lifecycle", () => {
     const secondProvider = new OpenAIProvider("test-model", {
       fetch: stubFetch,
     });
-    vi.spyOn(fresh, "buildProvider").mockReturnValue(secondProvider as never);
+    vi.spyOn(fresh, "buildProvider").mockReturnValue(secondProvider);
     await fresh.systemOne({
       state: "doc",
       questions: QUESTIONS,

@@ -13,8 +13,6 @@ interface NormalizationCase {
   expectedProbabilityErrors: Record<string, number>;
 }
 
-type ErrorRecord = Record<string, number>;
-
 const cases: readonly NormalizationCase[] = [
   {
     enabled: false,
@@ -66,16 +64,12 @@ describe("probability normalization and debug data", () => {
       };
       const probabilityNormalizations = {
         positive: undefined,
-        stars: normalizeAnswerProbabilities(
-          ["0", "1"],
-          scoreProbabilities,
-          "probabilities",
-          { enabled },
-        ),
+        stars: normalizeAnswerProbabilities(["0", "1"], scoreProbabilities, {
+          enabled,
+        }),
         genre: normalizeAnswerProbabilities(
           ["fiction", "nonfiction"],
           choiceProbabilities,
-          "probabilities",
           { enabled },
         ),
       };
@@ -94,7 +88,7 @@ describe("probability normalization and debug data", () => {
       expect(debugData.invalid_probs).toEqual(
         Object.keys(expectedProbabilityErrors).length,
       );
-      const probabilityErrors = debugData.probability_errors as ErrorRecord;
+      const probabilityErrors = debugData.probability_errors;
       expect(Object.keys(probabilityErrors).sort()).toEqual(
         Object.keys(expectedProbabilityErrors).sort(),
       );
@@ -104,4 +98,12 @@ describe("probability normalization and debug data", () => {
       expect(debugData.original_probabilities).toEqual(expectedOriginals);
     });
   }
+
+  it("builds discrete distributions from a selected label", () => {
+    const normalization = normalizeAnswerProbabilities(["yes", "no"], "yes", {
+      enabled: true,
+    });
+    expect(normalization.probabilities).toEqual({ yes: 1, no: 0 });
+    expect(normalization.error).toBe(0);
+  });
 });

@@ -1,28 +1,99 @@
-import type { EntryType, Questions } from "@typesafe-ai/sdk";
+import { type ArkError, scope, type Traversal, type Type, type } from "arktype";
 import type { AnswerMode } from "./utils/probabilityNormalization.js";
-
-/** A validated question in provider-neutral form. */
-type Question =
-  | {
-      type: "noul";
-      instructions?: EntryType;
-      criteria?: { true?: EntryType; false?: EntryType } | null;
-    }
-  | { type: "score"; instructions?: EntryType; criteria: EntryType[] }
-  | {
-      type: "choice";
-      instructions?: EntryType;
-      criteria: Record<string, EntryType>;
-    };
-
-/** A question that offers more than one outcome to choose between. */
-type GradedQuestion = Exclude<Question, { type: "noul" }>;
-
-/** A JSON schema object as sent to providers. */
-type JsonSchema = Record<string, unknown>;
 
 /** Score and choice questions need at least two outcomes to choose between. */
 const MIN_CRITERIA = 2;
+
+/**
+ * Runtime validation of the JSON values the SDK accepts for instructions,
+ * criteria, and state.
+ *
+ * `JsonObject` recursion mirrors the SDK's `JsonValue` so the validated
+ * inference stays structurally identical to the SDK types.
+ */
+const jsonTypes = scope({
+  JsonValue: "string|number|boolean|null|JsonValue[]|JsonObject",
+  JsonObject: {
+    "[string]": "JsonValue",
+  },
+}).export();
+
+/** Whether a value is a plain object: neither an array nor a function. */
+const isPlainObject = (value: object): boolean =>
+  !Array.isArray(value) && typeof value !== "function";
+
+/**
+ * A JSON object.
+ *
+ * The predicate rejects arrays and functions, which also satisfy arktype's
+ * `object` keyword, matching the SDK's plain-object entry values.
+ */
+const PlainObject = jsonTypes.JsonObject.narrow(isPlainObject);
+
+/** Runtime validation of one instruction or criterion value. */
+const entryTypes = scope({
+  PlainObject,
+  JsonValue: jsonTypes.JsonValue,
+  EntryType: "string|PlainObject|JsonValue[]|null",
+}).export();
+
+/**
+ * Runtime validation of noul criteria: a plain object of optional entry
+ * values for the true and false outcomes.
+ *
+ * The predicate rejects arrays, which satisfy arktype's optional-key checks.
+ */
+const NoulCriteria = type({
+  "true?": entryTypes.EntryType.or("undefined"),
+  "false?": entryTypes.EntryType.or("undefined"),
+}).narrow(isPlainObject);
+
+/**
+ * Runtime validation of choice criteria: a plain object of entry values.
+ *
+ * The predicate rejects arrays, which satisfy arktype index signatures.
+ */
+const ChoiceCriteria = type({
+  "[string]": entryTypes.EntryType,
+}).narrow(isPlainObject);
+
+/** Runtime validation of the SDK question schema. */
+const questionTypes = scope({
+  EntryType: entryTypes.EntryType,
+  NoulCriteria,
+  ChoiceCriteria,
+  NoulQuestion: {
+    type: "'noul'",
+    "instructions?": "EntryType|undefined",
+    "criteria?": "NoulCriteria|null|undefined",
+  },
+  ScoreQuestion: {
+    type: "'score'",
+    "instructions?": "EntryType|undefined",
+    criteria: "EntryType[]",
+  },
+  ChoiceQuestion: {
+    type: "'choice'",
+    "instructions?": "EntryType|undefined",
+    criteria: "ChoiceCriteria",
+  },
+  Question: "NoulQuestion|ScoreQuestion|ChoiceQuestion",
+  QuestionCollection: {
+    "[string]": "Question",
+  },
+}).export();
+
+/** A JSON value used for instructions, criteria, and state. */
+type EntryType = typeof questionTypes.EntryType.infer;
+
+/** A validated question in provider-neutral form. */
+type Question = typeof questionTypes.Question.infer;
+
+/** The runtime type of one arktype-validated model answer. */
+type ValidatedAnswer = boolean | number | string | Record<string, number>;
+
+/** A JSON schema object as sent to providers. */
+type JsonSchema = Record<string, unknown>;
 
 /** Error raised when the question collection does not match the SDK schema. */
 class InvalidQuestionsError extends Error {
@@ -40,107 +111,36 @@ class OutputValidationError extends Error {
   }
 }
 
-const isPlainObject = (value: unknown): value is Record<string, unknown> =>
-  typeof value === "object" && value !== null && !Array.isArray(value);
-
-const isEntryType = (value: unknown): value is EntryType =>
-  value === null ||
-  typeof value === "string" ||
-  isPlainObject(value) ||
-  Array.isArray(value);
-
-/** Require an instruction or criterion value, or throw where it was invalid. */
-const expectEntryType = (value: unknown, where: string): EntryType => {
-  if (!isEntryType(value))
-    throw new InvalidQuestionsError(
-      `${where}: expected text, a JSON value, or null`,
-    );
-  return value;
-};
-
-/** Validate a noul question's optional true/false criteria. */
-const noulCriteria = (
-  value: unknown,
-  where: string,
-): { true?: EntryType; false?: EntryType } => {
-  if (!isPlainObject(value))
-    throw new InvalidQuestionsError(`${where}.criteria: expected an object`);
-  for (const key of ["true", "false"] as const)
-    if (value[key] !== undefined)
-      expectEntryType(value[key], `${where}.criteria.${key}`);
-  return value as { true?: EntryType; false?: EntryType };
-};
-
-/** Validate a score question's ordered criteria. */
-const scoreCriteria = (value: unknown, where: string): EntryType[] => {
-  if (!Array.isArray(value))
-    throw new InvalidQuestionsError(`${where}.criteria: expected an array`);
-  for (const [index, criterion] of value.entries())
-    expectEntryType(criterion, `${where}.criteria.${index}`);
-  return value;
-};
-
-/** Validate a choice question's labeled criteria. */
-const choiceCriteria = (
-  value: unknown,
-  where: string,
-): Record<string, EntryType> => {
-  if (!isPlainObject(value))
-    throw new InvalidQuestionsError(`${where}.criteria: expected an object`);
-  for (const [label, criterion] of Object.entries(value))
-    expectEntryType(criterion, `${where}.criteria.${JSON.stringify(label)}`);
-  return value as Record<string, EntryType>;
-};
-
-/** Validate one question value against the SDK question schema. */
-const validateQuestion = (questionId: string, value: unknown): Question => {
-  const where = `questions.${questionId}`;
-  if (!isPlainObject(value))
-    throw new InvalidQuestionsError(`${where}: expected a question object`);
-  if (
-    value.type !== "noul" &&
-    value.type !== "score" &&
-    value.type !== "choice"
-  )
-    throw new InvalidQuestionsError(
-      `${where}.type: expected "noul", "score", or "choice"`,
-    );
-  if (value.instructions !== undefined)
-    expectEntryType(value.instructions, `${where}.instructions`);
-  const instructions = (value.instructions ?? null) as EntryType | null;
-  if (value.type === "noul")
-    return {
-      type: "noul",
-      instructions,
-      criteria:
-        value.criteria === null || value.criteria === undefined
-          ? null
-          : noulCriteria(value.criteria, where),
-    };
-  if (value.type === "score")
-    return {
-      type: "score",
-      instructions,
-      criteria: scoreCriteria(value.criteria, where),
-    };
-  return {
-    type: "choice",
-    instructions,
-    criteria: choiceCriteria(value.criteria, where),
-  };
+/** Normalize one validated question to plain data with defaulted fields. */
+const normalizeQuestion = (question: Question): Question => {
+  const instructions = question.instructions ?? null;
+  switch (question.type) {
+    case "noul":
+      return {
+        type: "noul",
+        instructions,
+        criteria: question.criteria ?? null,
+      };
+    case "score":
+      return { type: "score", instructions, criteria: question.criteria };
+    default:
+      return { type: "choice", instructions, criteria: question.criteria };
+  }
 };
 
 /** Validate a question collection and normalize it to plain data. */
-const validateQuestions = (questions: Questions): Record<string, Question> => {
-  const entries = Object.entries(questions ?? {});
-  if (entries.length === 0)
-    throw new InvalidQuestionsError("At least one question is required.");
-  const validated: Record<string, Question> = {};
-  for (const [questionId, value] of entries)
-    validated[questionId] = structuredClone(
-      validateQuestion(questionId, value),
+const validateQuestions = (questions: unknown): Record<string, Question> => {
+  const validated = questionTypes.QuestionCollection(questions);
+  if (validated instanceof type.errors)
+    throw new InvalidQuestionsError(
+      `Questions must match the SDK question schema:\n${validated.summary}`,
     );
-  for (const question of Object.values(validated))
+  const normalized: Record<string, Question> = {};
+  for (const [questionId, question] of Object.entries(validated))
+    normalized[questionId] = structuredClone(normalizeQuestion(question));
+  if (Object.keys(normalized).length === 0)
+    throw new InvalidQuestionsError("At least one question is required.");
+  for (const question of Object.values(normalized))
     if (
       question.type !== "noul" &&
       Object.keys(question.criteria).length < MIN_CRITERIA
@@ -148,7 +148,7 @@ const validateQuestions = (questions: Questions): Record<string, Question> => {
       throw new InvalidQuestionsError(
         "Score and choice questions require at least two criteria.",
       );
-  return validated;
+  return normalized;
 };
 
 /** Serialize an instruction or criterion value for inclusion in a prompt. */
@@ -160,19 +160,23 @@ const serializeInstructionValue = (value: unknown): string => {
 };
 
 /** The ordered answer labels of a score or choice question. */
-const answerLabels = (question: GradedQuestion): string[] =>
+const answerLabels = (question: Question): string[] =>
   question.type === "score"
     ? question.criteria.map((_, score) => String(score))
-    : Object.keys(question.criteria);
+    : question.type === "choice"
+      ? Object.keys(question.criteria)
+      : [];
 
 /** The criteria of a score or choice question, keyed by answer label. */
-const criteriaByLabel = (question: GradedQuestion): [string, EntryType][] =>
+const criteriaByLabel = (question: Question): [string, EntryType][] =>
   question.type === "score"
     ? question.criteria.map((criterion, score): [string, EntryType] => [
         String(score),
         criterion,
       ])
-    : Object.entries(question.criteria);
+    : question.type === "choice"
+      ? Object.entries(question.criteria)
+      : [];
 
 /** The per-question description used on probability-map definitions. */
 const questionDescription = (question: Question, mode: AnswerMode): string => {
@@ -284,9 +288,7 @@ const buildOutputSpec = (
     spec.answers[questionId] = answerSpec;
     if (answerSpec.kind === "probabilityMap") {
       const properties: Record<string, string> = {};
-      for (const [label, criterion] of criteriaByLabel(
-        question as GradedQuestion,
-      ))
+      for (const [label, criterion] of criteriaByLabel(question))
         properties[label] = serializeInstructionValue(criterion);
       spec.probabilityMaps[`ProbabilityMap${index}`] = {
         description: questionDescription(question, llmAnswerMode),
@@ -361,114 +363,71 @@ const buildSchema = (spec: OutputSpec): JsonSchema => {
   };
 };
 
-const isProbability = (value: unknown): boolean =>
-  typeof value === "number" &&
-  Number.isFinite(value) &&
-  value >= 0 &&
-  value <= 1;
+/** arktype type of one probability: a finite number in [0, 1]. */
+const Probability = type("number").atLeast(0).atMost(1);
 
-/** Describe a value for a validation message. */
-const describeValue = (value: unknown): string => {
-  const json = JSON.stringify(value);
-  const type =
-    value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
-  return `${json} (${type})`;
-};
+/** arktype type of a discrete boolean answer. */
+const BooleanAnswer = type("boolean");
 
-/** Check a probability map has exactly the required labels, each in [0, 1]. */
-const validateProbabilityMap = (
-  labels: readonly string[],
-  value: unknown,
-  where: string,
-  issues: string[],
-): void => {
-  if (!isPlainObject(value)) {
-    issues.push(`${where}: expected an object, got ${describeValue(value)}`);
-    return;
-  }
-  for (const label of labels)
-    if (!(label in value))
-      issues.push(
-        `${where}: missing required property ${JSON.stringify(label)}`,
-      );
-  for (const key of Object.keys(value))
-    if (!labels.includes(key))
-      issues.push(
-        `${where}: extra property ${JSON.stringify(key)} is not allowed`,
-      );
-  for (const label of labels)
-    if (label in value && !isProbability(value[label]))
-      issues.push(
-        `${where}.${label}: expected a number between 0 and 1, got ${describeValue(value[label])}`,
-      );
-};
+/** Require exactly the given keys on a probability map. */
+const exactKeySet =
+  (labels: readonly string[]) =>
+  (value: Record<string, number>, ctx: Traversal): boolean => {
+    const keys = Object.keys(value);
+    if (
+      labels.every((label) => keys.includes(label)) &&
+      keys.every((key) => labels.includes(key))
+    )
+      return true;
+    return ctx.mustBe(
+      `an object with exactly the properties ${JSON.stringify(labels)}`,
+    );
+  };
 
-/** Validate one answer value against its spec, appending any issues. */
-const validateAnswerValue = (
-  questionId: string,
-  spec: AnswerSpec,
-  value: unknown,
-  issues: string[],
-): void => {
-  const where = `answers.${questionId}`;
-  switch (spec.kind) {
+/** Build the arktype type validating one answer per its answer spec. */
+const answerType = (answerSpec: AnswerSpec): Type<ValidatedAnswer> => {
+  switch (answerSpec.kind) {
     case "boolean":
-      if (typeof value !== "boolean")
-        issues.push(
-          `${where}: expected true or false, got ${describeValue(value)}`,
-        );
-      return;
+      return BooleanAnswer;
     case "probability":
-      if (!isProbability(value))
-        issues.push(
-          `${where}: expected a number between 0 and 1, got ${describeValue(value)}`,
-        );
-      return;
+      return Probability;
     case "integer":
-      if (
-        typeof value !== "number" ||
-        !Number.isInteger(value) ||
-        value < 0 ||
-        value >= spec.max
-      )
-        issues.push(
-          `${where}: expected an integer in [0, ${spec.max}), got ${describeValue(value)}`,
-        );
-      return;
+      return type("number").divisibleBy(1).atLeast(0).lessThan(answerSpec.max);
     case "enum":
-      if (typeof value !== "string" || !spec.values.includes(value))
-        issues.push(
-          `${where}: expected one of ${JSON.stringify(spec.values)}, got ${describeValue(value)}`,
-        );
-      return;
+      return type.enumerated(...answerSpec.values);
     case "probabilityMap":
-      validateProbabilityMap(spec.labels, value, where, issues);
-      return;
+      return type({ "[string]": Probability }).narrow(
+        exactKeySet(answerSpec.labels),
+      );
   }
+};
+
+/** arktype type of the answers record inside a model payload. */
+const AnswersRecord = type({ "[string]": "unknown" });
+
+/** arktype type of a parsed model payload: exactly an `answers` object. */
+const ModelPayload = type({ answers: AnswersRecord }).onUndeclaredKey("reject");
+
+/** Render one arktype error as a validation issue string. */
+const issueFor = (prefix: string, error: ArkError): string => {
+  const path = error.path.map(String).join(".");
+  return path === ""
+    ? `${prefix}${error.problem}`
+    : `${prefix}${path}: ${error.problem}`;
 };
 
 /** Validate a parsed model response against the output spec. */
 const validateOutput = (
   spec: OutputSpec,
   payload: unknown,
-): Record<string, unknown> => {
+): Record<string, ValidatedAnswer> => {
   const issues: string[] = [];
-  if (!isPlainObject(payload)) {
-    issues.push(`expected a JSON object, got ${describeValue(payload)}`);
+  const container = ModelPayload(payload);
+  if (container instanceof type.errors) {
+    for (const error of container) issues.push(issueFor("", error));
     throw new OutputValidationError(issues);
   }
-  for (const key of Object.keys(payload))
-    if (key !== "answers")
-      issues.push(`extra property ${JSON.stringify(key)} is not allowed`);
-  const answers = payload.answers;
-  if (!("answers" in payload)) {
-    issues.push('missing required property "answers"');
-    throw new OutputValidationError(issues);
-  }
-  if (!isPlainObject(answers)) {
-    issues.push(`answers: expected an object, got ${describeValue(answers)}`);
-    throw new OutputValidationError(issues);
-  }
+  const answers = container.answers;
   for (const questionId of spec.questionIds)
     if (!(questionId in answers))
       issues.push(
@@ -479,16 +438,17 @@ const validateOutput = (
       issues.push(
         `answers: extra property ${JSON.stringify(key)} is not allowed`,
       );
-  for (const questionId of spec.questionIds)
-    if (questionId in answers)
-      validateAnswerValue(
-        questionId,
-        spec.answers[questionId],
-        answers[questionId],
-        issues,
-      );
+  const validated: Record<string, ValidatedAnswer> = {};
+  for (const questionId of spec.questionIds) {
+    if (!(questionId in answers)) continue;
+    const answer = answerType(spec.answers[questionId])(answers[questionId]);
+    if (answer instanceof type.errors)
+      for (const error of answer)
+        issues.push(issueFor(`answers.${questionId}.`, error));
+    else validated[questionId] = answer;
+  }
   if (issues.length > 0) throw new OutputValidationError(issues);
-  return answers;
+  return validated;
 };
 
 export {
@@ -497,11 +457,13 @@ export {
   answerLabels,
   buildOutputSpec,
   buildSchema,
+  type EntryType,
   InvalidQuestionsError,
   type JsonSchema,
   type OutputSpec,
   OutputValidationError,
   type Question,
+  type ValidatedAnswer,
   validateOutput,
   validateQuestions,
 };

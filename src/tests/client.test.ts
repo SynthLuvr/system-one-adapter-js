@@ -13,6 +13,7 @@ import {
   type ProviderResult,
 } from "../providers/base.js";
 import { OutputValidationError } from "../schema.js";
+import { asRecord, asRecords, debugOf } from "./testRecords.js";
 
 const STATE = "This is a delightful fiction novel.";
 const QUESTIONS = {
@@ -31,6 +32,10 @@ const QUESTIONS = {
 
 const providerError = (status: number): APIError =>
   APIError.fromResponse(status, { message: "unavailable" }, new Headers());
+
+/** Await an evaluation, returning a terminal error instead of rejecting. */
+const caught = (evaluation: Promise<unknown>): Promise<unknown> =>
+  evaluation.catch((error: unknown) => error);
 
 /** Provider returning a scripted sequence of payloads and errors. */
 class FakeProvider implements Provider {
@@ -101,37 +106,15 @@ describe("client with a fake provider", () => {
       llmAnswerMode: "probabilities",
     });
 
-    const response = (await client.systemOne({
+    const response = await client.systemOne({
       state: STATE,
       questions,
       model: provider,
-    })) as unknown as {
-      nouls: Record<string, { noul: number } | undefined>;
-      scores:
-        | Record<
-            string,
-            | {
-                score: number;
-                legend: Record<string, string>;
-                probabilities: Record<string, number>;
-              }
-            | undefined
-          >
-        | undefined;
-      choices: Record<string, { choice: string } | undefined>;
-      answers: Record<
-        string,
-        { probabilities?: Record<string, number> } | undefined
-      >;
-      toJSON: () => {
-        answers: Record<string, unknown>;
-        usage: { n_retries: number };
-      };
-    };
+    });
 
     expect(response.nouls.positive?.noul).toBe(0.8);
-    expect(response.scores?.stars?.score).toBe(0.75);
-    expect(response.scores?.stars?.legend).toEqual({ 0: "Bad.", 1: "Good." });
+    expect(response.scores.stars?.score).toBe(0.75);
+    expect(response.scores.stars?.legend).toEqual({ 0: "Bad.", 1: "Good." });
     expect(response.choices.genre?.choice).toBe("fiction");
     expect(response.answers.stars?.probabilities).toEqual({ 0: 0.25, 1: 0.75 });
     expect(response.nouls.positive).toBe(response.answers.positive);
@@ -236,22 +219,21 @@ describe("client with a fake provider", () => {
       retry: { maxRetries: 2, backoffInitialMs: 1, backoffJitter: 0 },
     });
 
-    const error = (await client
+    const error = await client
       .systemOne({
         state: "state",
         questions: { answer: QUESTIONS.positive },
         model: provider,
       })
-      .catch((caught: unknown) => caught)) as APIError;
+      .catch((caught: unknown) => caught);
 
     expect(provider.calls.length).toBe(3);
     expect(error).toBeInstanceOf(APIError);
+    if (!(error instanceof APIError)) throw new Error("expected an APIError");
     expect(error.status).toBe(503);
     expect(error).toBeInstanceOf(InternalServerError);
-    const debug = (
-      error as Error & { debug?: { retry_reasons: [string, string][] } }
-    ).debug;
-    expect(debug?.retry_reasons.map(([category]) => category)).toEqual([
+    const debug = debugOf(error);
+    expect(asRecords(debug.retry_reasons).map((reason) => reason[0])).toEqual([
       "provider_error",
       "provider_error",
     ]);
@@ -271,36 +253,33 @@ describe("client with a fake provider", () => {
           nRetryMalformedStructure,
         });
 
-        const error = (await client
-          .systemOne({
+        const error = await caught(
+          client.systemOne({
             state: "state",
             questions: { answer: QUESTIONS.positive },
             model: provider,
-          })
-          .catch((caught: unknown) => caught)) as APIError;
+          }),
+        );
 
         expect(provider.calls.length).toBe(nRetryMalformedStructure + 1);
-        const debug = (
-          error as Error & {
-            debug?: {
-              retry_reasons: [string, string][];
-              llm_attempts: {
-                messages: unknown[];
-                llm_response: { text: string } | null;
-              }[];
-            };
-          }
-        ).debug;
-        expect(debug?.retry_reasons.map(([category]) => category)).toEqual(
+        if (!(error instanceof APIError))
+          throw new Error("expected an APIError");
+        const debug = debugOf(error);
+        const retryReasons = asRecords(debug.retry_reasons);
+        expect(retryReasons.map((reason) => reason[0])).toEqual(
           Array<string>(nRetryMalformedStructure).fill("malformed_structure"),
         );
         expect(error.cause).toBeInstanceOf(OutputValidationError);
-        expect(String((error.cause as Error).message)).toContain(errorFragment);
-        for (const [, message] of debug?.retry_reasons ?? [])
-          expect(message).toContain(errorFragment);
-        const attempts = debug?.llm_attempts ?? [];
+        const cause = error.cause;
+        if (!(cause instanceof Error)) throw new Error("expected a cause");
+        expect(cause.message).toContain(errorFragment);
+        for (const reason of retryReasons)
+          expect(String(reason[1])).toContain(errorFragment);
+        const attempts = asRecords(debug.llm_attempts);
         expect(attempts.length).toBe(nRetryMalformedStructure + 1);
-        expect(attempts.map((attempt) => attempt.messages.length)).toEqual(
+        expect(
+          attempts.map((attempt) => asRecords(attempt.messages).length),
+        ).toEqual(
           Array.from({ length: attempts.length }, (_, index) => 2 * index + 2),
         );
         const expectedText =
@@ -308,7 +287,7 @@ describe("client with a fake provider", () => {
             ? malformedResponse
             : JSON.stringify(malformedResponse);
         for (const attempt of attempts)
-          expect(attempt.llm_response?.text).toBe(expectedText);
+          expect(asRecord(attempt.llm_response).text).toBe(expectedText);
         expect(() => JSON.stringify(debug)).not.toThrow();
       }
     },

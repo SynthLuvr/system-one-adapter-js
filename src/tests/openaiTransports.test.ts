@@ -6,6 +6,14 @@ import {
   OpenAIProvider,
   responsesResult,
 } from "../providers/openai.js";
+import {
+  asMessage,
+  asRecord,
+  asRecords,
+  asString,
+  bodyText,
+  debugOf,
+} from "./testRecords.js";
 
 const QUESTIONS = {
   positive: { type: "noul", instructions: "The review is positive." },
@@ -38,7 +46,7 @@ const transport = (
   ): Promise<Response> => {
     const url = new URL(requestPath(input));
     expect(url.pathname).toBe(endpoint);
-    requests.push(JSON.parse((init?.body as string | undefined) ?? ""));
+    requests.push(JSON.parse(bodyText(init)));
     const text = texts();
     const payload =
       endpoint === "/v1/responses"
@@ -48,7 +56,7 @@ const transport = (
             created_at: 0,
             status: "completed",
             model: "test-model",
-            text: (requests[requests.length - 1] as { text?: unknown }).text,
+            text: asRecord(requests[requests.length - 1]).text,
             output: [
               {
                 id: "reasoning-test",
@@ -155,26 +163,23 @@ describe("openai transports", () => {
           2, 4,
         ]);
         for (const [index, attempt] of attempts.entries()) {
-          const raw = attempt.llm_response as Record<string, never>;
+          const raw = asRecord(attempt.llm_response);
           if (endpoint === "/v1/responses") {
-            const requestFormat = (
-              attempt.request as { text: { format: Record<string, unknown> } }
-            ).text.format;
-            expect(
-              (raw.text as unknown as { format: Record<string, unknown> })
-                .format,
-            ).toEqual(requestFormat);
+            const requestFormat = asRecord(
+              asRecord(asRecord(attempt.request).text).format,
+            );
+            expect(asRecord(asRecord(raw.text).format)).toEqual(requestFormat);
           }
           const text =
             endpoint === "/v1/responses"
-              ? (raw.output as { content: { text: string }[] }[])[1].content[0]
-                  .text
-              : (raw.choices as { message: { content: string } }[])[0].message
-                  .content;
+              ? asString(
+                  asRecord(asRecords(asRecords(raw.output)[1].content)[0]).text,
+                )
+              : asString(asRecord(asRecords(raw.choices)[0].message).content);
           expect(text).toBe(
             index === 0 ? MALFORMED : '{"answers":{"positive":true}}',
           );
-          expect(attempt.debug_info.api).toBe(
+          expect(asRecord(attempt.debug_info).api).toBe(
             endpoint === "/v1/responses" ? "responses" : "chat_completions",
           );
         }
@@ -184,58 +189,44 @@ describe("openai transports", () => {
           if (endpoint === "/v1/responses") {
             expect(body.store).toBe(false);
             expect("previous_response_id" in body).toBe(false);
-            const input = body.input as { role: string; content: string }[];
-            const instructions = body.instructions as string | undefined;
-            expect(instructions ?? input[0].content).toMatch(
-              /^Evaluate every question/,
-            );
+            const input = asRecords(body.input);
+            const instructionText =
+              typeof body.instructions === "string"
+                ? body.instructions
+                : asString(input[0].content);
+            expect(instructionText).toMatch(/^Evaluate every question/);
             if (!structured)
               expect(JSON.stringify(body.input)).toContain("JSON");
-            const outputFormat = (
-              body.text as { format: { type: string; strict?: boolean } }
-            ).format;
+            const outputFormat = asRecord(asRecord(body.text).format);
             expect(outputFormat.type).toBe(
               structured ? "json_schema" : "json_object",
             );
             if (structured) {
               expect(outputFormat.strict).toBe(true);
-              const schema = (
-                body.text as {
-                  format: {
-                    schema: {
-                      $defs: Record<
-                        string,
-                        { properties: Record<string, unknown> }
-                      >;
-                    };
-                  };
-                }
-              ).format.schema;
-              expect(
-                "positive" in schema.$defs.TypeSafeAnswers.properties,
-              ).toBe(true);
+              const schema = asRecord(outputFormat.schema);
+              const defs = asRecord(schema.$defs);
+              const typeSafeAnswers = asRecord(defs.TypeSafeAnswers);
+              expect("positive" in asRecord(typeSafeAnswers.properties)).toBe(
+                true,
+              );
             }
             expect(input[0].role).toBe(structured ? "user" : "system");
           } else {
-            const messages = body.messages as { role: string }[];
+            const messages = asRecords(body.messages);
             expect(messages[0].role).toBe("system");
             if (structured)
               expect(
-                (body.response_format as { json_schema: { strict: boolean } })
-                  .json_schema.strict,
+                asRecord(asRecord(body.response_format).json_schema).strict,
               ).toBe(true);
             else expect(body.response_format).toBeUndefined();
           }
 
-        const lastMessages = (
-          recorded.requests[recorded.requests.length - 1] as {
-            input?: { role: string; content: string }[];
-            messages?: { role: string; content: string }[];
-          }
-        )[endpoint === "/v1/responses" ? "input" : "messages"] as {
-          role: string;
-          content: string;
-        }[];
+        const lastRequest = asRecord(
+          recorded.requests[recorded.requests.length - 1],
+        );
+        const lastMessages = asRecords(
+          lastRequest[endpoint === "/v1/responses" ? "input" : "messages"],
+        );
         expect(lastMessages[lastMessages.length - 2]).toEqual({
           role: "assistant",
           content: MALFORMED,
@@ -260,7 +251,7 @@ describe("openai transports", () => {
       };
       const reason =
         status === "failed" ? "generation failed" : "max_output_tokens";
-      expect(() => responsesResult(response as never)).toThrowError(
+      expect(() => responsesResult(response)).toThrowError(
         `OpenAI response did not complete: ${reason}.`,
       );
     },
@@ -279,13 +270,11 @@ describe("openai transports", () => {
         _input: RequestInfo | URL,
         init?: RequestInit,
       ): Promise<Response> => {
-        const body = JSON.parse((init?.body as string | undefined) ?? "") as {
-          input: { content: string }[];
-        };
+        const body = asRecord(JSON.parse(bodyText(init)));
         requests.push(body);
         if (requests.length >= 2) release();
         await gate;
-        const document = body.input[0].content;
+        const document = asString(asRecords(body.input)[0].content);
         const status = document.includes("first document")
           ? firstStatus
           : "completed";
@@ -335,11 +324,11 @@ describe("openai transports", () => {
         document: string,
       ): Promise<Record<string, unknown>> => {
         try {
-          return (
-            await client.systemOne({ state: document, questions: QUESTIONS })
-          ).debug as unknown as Record<string, unknown>;
+          return debugOf(
+            await client.systemOne({ state: document, questions: QUESTIONS }),
+          );
         } catch (error) {
-          return (error as { debug?: Record<string, unknown> }).debug ?? {};
+          return debugOf(error);
         }
       };
       const [first, second] = await Promise.all([
@@ -350,36 +339,32 @@ describe("openai transports", () => {
         [first, "first document", firstStatus],
         [second, "second document", "completed"],
       ] as const) {
-        const attempts = debug.llm_attempts as {
-          messages: { content: string }[];
-          request: { input: { content: string }[] };
-          llm_response: { status: string };
-          debug_info: { finish_reason: string; error?: string };
-        }[];
+        const attempts = asRecords(debug.llm_attempts);
         expect(attempts.length).toBe(1);
         const attempt = attempts[0];
-        expect(attempt.messages[1].content).toContain(document);
-        expect(attempt.request.input[0].content).toContain(document);
+        expect(asString(asRecords(attempt.messages)[1].content)).toContain(
+          document,
+        );
+        expect(
+          asString(asRecords(asRecord(attempt.request).input)[0].content),
+        ).toContain(document);
         expect(requests).toEqual(expect.arrayContaining([attempt.request]));
-        expect(attempt.llm_response.status).toBe(status);
-        expect(attempt.debug_info.finish_reason).toBe(status);
-        expect("error" in attempt.debug_info).toBe(status !== "completed");
+        expect(asRecord(attempt.llm_response).status).toBe(status);
+        const debugInfo = asRecord(attempt.debug_info);
+        expect(debugInfo.finish_reason).toBe(status);
+        expect("error" in debugInfo).toBe(status !== "completed");
       }
 
       // A later direct provider call must not mutate either finished trace.
       const before = JSON.stringify([first, second]);
-      const attempt = (
-        second.llm_attempts as {
-          messages: { role: string; content: string }[];
-          model_request_parameters: Record<string, unknown>;
-        }[]
-      )[0];
+      const attempt = asRecords(second.llm_attempts)[0];
+      const parameters = asRecord(attempt.model_request_parameters);
       await provider.request(
-        attempt.messages.map((message) => ({
-          ...message,
-          role: message.role as "system" | "user" | "assistant",
-        })),
-        attempt.model_request_parameters as never,
+        asRecords(attempt.messages).map((message) => asMessage(message)),
+        {
+          schema: asRecord(parameters.schema),
+          structured: parameters.structured === true,
+        },
       );
       expect(JSON.stringify([first, second])).toBe(before);
     },

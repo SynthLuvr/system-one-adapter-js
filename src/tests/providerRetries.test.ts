@@ -4,6 +4,7 @@ import { SystemOneAdapterClient } from "../client.js";
 import { AnthropicProvider } from "../providers/anthropic.js";
 import type { Provider } from "../providers/base.js";
 import { OpenAIProvider } from "../providers/openai.js";
+import { asRecord, asRecords, bodyText, debugOf } from "./testRecords.js";
 
 const QUESTIONS = {
   positive: { type: "noul", instructions: "The review is positive." },
@@ -25,7 +26,7 @@ const makeProvider = (
     _input: RequestInfo | URL,
     init?: RequestInit,
   ): Promise<Response> => {
-    requests.push(JSON.parse((init?.body as string | undefined) ?? ""));
+    requests.push(JSON.parse(bodyText(init)));
     return new Response(JSON.stringify({ error: { message: "unavailable" } }), {
       status: 503,
       headers: { "content-type": "application/json" },
@@ -61,27 +62,21 @@ describe("provider retry budgets", () => {
 
       const error = await client
         .systemOne({ state: "A delightful book.", questions: QUESTIONS })
-        .catch((caught: unknown) => caught as InternalServerError);
+        .catch((caught: unknown) => caught);
 
       expect(error).toBeInstanceOf(InternalServerError);
-      const debug = (
-        error as {
-          debug?: {
-            llm_attempts: {
-              request: unknown;
-              llm_response: unknown;
-              debug_info: { error_type?: string; error?: string };
-            }[];
-          };
-        }
-      ).debug;
-      const attempts = debug?.llm_attempts ?? [];
+      const debug = debugOf(error);
+      const attempts = asRecords(debug.llm_attempts);
       expect(attempts.length).toBe(retryBudget + 1);
       expect(attempts.map((attempt) => attempt.request)).toEqual(requests);
       for (const attempt of attempts) {
         expect(attempt.llm_response).toBeNull();
-        expect(attempt.debug_info.error_type).toBe("InternalServerError");
-        expect(attempt.debug_info.error).toContain("unavailable");
+        expect(asRecord(attempt.debug_info).error_type).toBe(
+          "InternalServerError",
+        );
+        expect(String(asRecord(attempt.debug_info).error)).toContain(
+          "unavailable",
+        );
       }
       expect(() => JSON.stringify(debug)).not.toThrow();
       expect(requests.length).toBe(retryBudget + 1);

@@ -4,6 +4,7 @@ import {
   type RetryPolicy,
   TypeSafeError,
 } from "@typesafe-ai/sdk";
+import { type } from "arktype";
 import {
   buildProvider,
   type ClosableProvider,
@@ -19,15 +20,18 @@ import {
   type AdapterDebug,
   type AdapterUsage,
   attachDebug,
+  type SdkAnswer,
   type SystemOneResponse,
 } from "./response.js";
 import {
   answerLabels,
   buildOutputSpec,
   buildSchema,
+  type EntryType,
   type OutputSpec,
   OutputValidationError,
   type Question,
+  type ValidatedAnswer,
   validateOutput,
   validateQuestions,
 } from "./schema.js";
@@ -92,9 +96,8 @@ const parseJson = (text: string): unknown => {
   try {
     return JSON.parse(extractJson(text));
   } catch (error) {
-    throw new OutputValidationError([
-      `invalid JSON: ${(error as Error).message}`,
-    ]);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new OutputValidationError([`invalid JSON: ${message}`]);
   }
 };
 
@@ -102,7 +105,8 @@ const parseJson = (text: string): unknown => {
 const decodeModelOutput = (
   outputSpec: OutputSpec,
   text: string,
-): Record<string, unknown> => validateOutput(outputSpec, parseJson(text));
+): Record<string, ValidatedAnswer> =>
+  validateOutput(outputSpec, parseJson(text));
 
 /** The corrective user message sent after a schema-validation failure. */
 const correctionPrompt = (error: OutputValidationError): string =>
@@ -124,14 +128,14 @@ const malformedOutputError = (error: OutputValidationError): APIError => {
 
 /** One typed answer plus its probability diagnostics. */
 interface ConvertedAnswer {
-  answer: Record<string, unknown>;
+  answer: SdkAnswer;
   normalization: ProbabilityNormalization | undefined;
 }
 
 /** Convert one validated LLM answer to the SDK answer shape. */
 const convertLlmAnswer = (
   question: Question,
-  value: unknown,
+  value: ValidatedAnswer,
   llmAnswerMode: AnswerMode,
   { shouldNormalizeProbabilities }: { shouldNormalizeProbabilities: boolean },
 ): ConvertedAnswer => {
@@ -145,12 +149,9 @@ const convertLlmAnswer = (
   }
 
   const labels = answerLabels(question);
-  const normalization = normalizeAnswerProbabilities(
-    labels,
-    value,
-    llmAnswerMode,
-    { enabled: shouldNormalizeProbabilities },
-  );
+  const normalization = normalizeAnswerProbabilities(labels, value, {
+    enabled: shouldNormalizeProbabilities,
+  });
   const { probabilities } = normalization;
   const probabilityList = labels.map((label) => probabilities[label]);
 
@@ -163,7 +164,7 @@ const convertLlmAnswer = (
       (expected, label, index) => expected + index * scoreDistribution[label],
       0,
     );
-    const legend: Record<string, unknown> = {};
+    const legend: Record<string, EntryType> = {};
     for (const [level, criterion] of question.criteria.entries())
       legend[String(level)] = criterion;
     return {
@@ -239,8 +240,8 @@ class EvaluationRun {
     result: ProviderResult,
     messages: Message[],
     correctiveAttempt: number,
-  ): Record<string, unknown> | undefined {
-    let output: Record<string, unknown>;
+  ): Record<string, ValidatedAnswer> | undefined {
+    let output: Record<string, ValidatedAnswer>;
     try {
       output = decodeModelOutput(this.outputSpec, result.text);
     } catch (error) {
@@ -274,7 +275,7 @@ class EvaluationRun {
     provider: Provider,
     retry: RetryPolicy,
   ): Promise<{
-    output: Record<string, unknown>;
+    output: Record<string, ValidatedAnswer>;
     lastResult: ProviderResult;
     nRetries: number;
   }> {
@@ -304,7 +305,7 @@ class EvaluationRun {
   }
 
   /** Attempt traces and retry reasons, including on terminal exceptions. */
-  errorDebug(): Record<string, unknown> {
+  errorDebug(): Pick<AdapterDebug, "llm_attempts" | "retry_reasons"> {
     return {
       llm_attempts: this.llmAttempts,
       retry_reasons: this.retryReasons.map((reason) => [
@@ -316,11 +317,11 @@ class EvaluationRun {
 
   /** Build the TypeSafe-shaped response from a successful attempt. */
   response<Q extends Questions>(
-    output: Record<string, unknown>,
+    output: Record<string, ValidatedAnswer>,
     lastResult: ProviderResult,
     nRetries: number,
   ): SystemOneResponse<Q> {
-    const answers: Record<string, Record<string, unknown>> = {};
+    const answers: Record<string, SdkAnswer> = {};
     const normalizations: Record<string, ProbabilityNormalization | undefined> =
       {};
     for (const [questionId, question] of Object.entries(this.questions)) {
@@ -342,10 +343,10 @@ class EvaluationRun {
       n_retries_malformed_structure: this.nRetriesMalformedStructure,
       latency: (performance.now() - this.startedAt) / 1000,
     };
-    const debug = {
+    const debug: AdapterDebug = {
       ...probabilityDebugData(normalizations),
       ...this.errorDebug(),
-    } as unknown as AdapterDebug;
+    };
     return buildResponse({ model: this.modelName, answers, usage, debug });
   }
 }
@@ -353,15 +354,17 @@ class EvaluationRun {
 /** Assemble a response with typed views and JSON serialization. */
 const buildResponse = <Q extends Questions>(init: {
   model: string;
-  answers: Record<string, Record<string, unknown>>;
+  answers: Record<string, SdkAnswer>;
   usage: AdapterUsage;
   debug: AdapterDebug;
 }): SystemOneResponse<Q> => {
-  const filterByType = (type: string): Record<string, unknown> =>
+  const filterByType = (type: string): Record<string, SdkAnswer> =>
     Object.fromEntries(
       Object.entries(init.answers).filter(([, answer]) => answer.type === type),
     );
-  const response = {
+  // The runtime answers are arktype-validated and converted to SDK answer
+  // shapes, so the constraint instantiation accepts them directly.
+  const response: SystemOneResponse<Questions> = {
     model: init.model,
     answers: init.answers,
     usage: init.usage,
@@ -373,14 +376,23 @@ const buildResponse = <Q extends Questions>(init: {
       model: init.model,
       usage: init.usage,
       answers: init.answers,
-      debug: init.debug as unknown as Record<string, unknown>,
+      debug: init.debug,
     }),
   };
-  return response as unknown as SystemOneResponse<Q>;
+  // Projecting the same validated answers onto the caller's inferred question
+  // keys is a compile-time-only refinement; the assertion is checked against
+  // the constraint instantiation above and has no runtime effect.
+  return response as SystemOneResponse<Q>;
 };
 
 /** A callback stand-in replaced before use. */
 const noop = (): void => undefined;
+
+/** arktype type of the allowed LLM answer modes. */
+const LlmAnswerMode = type("'probabilities'|'discrete'");
+
+/** arktype type of a nonnegative corrective-retry allowance. */
+const RetryAllowance = type("number >= 0");
 
 /** Options accepted by the adapter client constructor. */
 interface SystemOneAdapterClientOptions {
@@ -429,18 +441,16 @@ class SystemOneAdapterClient {
   #closeSettled = true;
 
   constructor(options: SystemOneAdapterClientOptions) {
-    if (
-      options.llmAnswerMode !== "probabilities" &&
-      options.llmAnswerMode !== "discrete"
-    )
+    const mode = LlmAnswerMode(options.llmAnswerMode);
+    if (mode instanceof type.errors)
       throw new Error("llm_answer_mode must be 'probabilities' or 'discrete'");
-    const nRetryMalformedStructure = options.nRetryMalformedStructure ?? 0;
-    if (nRetryMalformedStructure < 0)
+    const allowance = RetryAllowance(options.nRetryMalformedStructure ?? 0);
+    if (allowance instanceof type.errors)
       throw new Error("n_retry_malformed_structure must be >= 0");
     this.structuredOutputs = options.structuredOutputs;
-    this.llmAnswerMode = options.llmAnswerMode;
+    this.llmAnswerMode = mode;
     this.normalizeProbabilities = options.normalizeProbabilities ?? false;
-    this.nRetryMalformedStructure = nRetryMalformedStructure;
+    this.nRetryMalformedStructure = allowance;
     this.retry = resolveRetryPolicy(options.retry);
     this.provider = options.provider;
     this.model = options.model;

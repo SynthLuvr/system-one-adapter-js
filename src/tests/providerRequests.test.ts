@@ -7,7 +7,18 @@ import {
   requestParams,
 } from "../providers/anthropic.js";
 import type { Message } from "../providers/base.js";
-import { chatResult, responseFormat } from "../providers/openai.js";
+import {
+  chatResult,
+  responseFormat,
+  responsesResult,
+} from "../providers/openai.js";
+import {
+  asRecord,
+  asRecords,
+  asString,
+  bodyText,
+  debugOf,
+} from "./testRecords.js";
 
 const SCHEMA = { type: "object", properties: { answers: { type: "object" } } };
 const requestPath = (input: RequestInfo | URL): string =>
@@ -52,6 +63,37 @@ describe("provider request building and parsing", () => {
     });
     expect(result.text).toBe('{"answers": {}}');
     expect([result.inputTokens, result.outputTokens]).toEqual([12, 3]);
+  });
+
+  it("rejects responses payloads that do not match the expected shape", () => {
+    expect(() =>
+      responsesResult({
+        status: 42,
+        output_text: "x",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    ).toThrowError(/expected shape/);
+  });
+
+  it("rejects completed responses without valid usage", () => {
+    expect(() =>
+      responsesResult({ status: "completed", output_text: "x" }),
+    ).toThrowError(/usage/);
+  });
+
+  it("rejects chat payloads that do not match the expected shape", () => {
+    expect(() =>
+      chatResult({ choices: [{ message: { content: "x" } }] }),
+    ).toThrowError(/expected shape/);
+  });
+
+  it("rejects anthropic payloads that do not match the expected shape", () => {
+    expect(() =>
+      anthropicResult({
+        content: [],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    ).toThrowError(/expected shape/);
   });
 
   it("puts the schema in the anthropic output config when structured", () => {
@@ -112,7 +154,7 @@ describe("provider request building and parsing", () => {
           init?: RequestInit,
         ): Promise<Response> => {
           expect(new URL(requestPath(input)).pathname).toBe("/v1/messages");
-          requests.push(JSON.parse((init?.body as string | undefined) ?? ""));
+          requests.push(JSON.parse(bodyText(init)));
           return new Response(
             JSON.stringify({
               id: "msg-test",
@@ -144,37 +186,37 @@ describe("provider request building and parsing", () => {
         let debug: Record<string, unknown> | undefined;
 
         if (truncated) {
-          const error = (await client
+          const error = await client
             .systemOne({ state: "A delightful book.", questions: QUESTIONS })
-            .catch((caught: unknown) => caught)) as TypeSafeError;
+            .catch((caught: unknown) => caught);
           expect(error).toBeInstanceOf(TypeSafeError);
+          if (!(error instanceof TypeSafeError))
+            throw new Error("expected a TypeSafeError");
           expect(error.message).toMatch(/truncated.*Increase max_tokens/);
-          debug = (error as { debug?: Record<string, unknown> }).debug;
+          debug = debugOf(error);
         } else {
           const response = await client.systemOne({
             state: "A delightful book.",
             questions: QUESTIONS,
           });
           expect(response.nouls.positive?.noul).toBe(1);
-          debug = response.debug as unknown as Record<string, unknown>;
+          debug = response.debug;
         }
         expect(requests.length).toBe(1);
         expect(requests[0].max_tokens).toBe(8192);
         if (debug === undefined) throw new Error("debug missing");
-        const attempts = debug.llm_attempts as {
-          request: Record<string, unknown>;
-          llm_response: { content: { text: string }[] };
-          debug_info: { finish_reason: string; error?: string };
-        }[];
+        const attempts = asRecords(debug.llm_attempts);
         expect(attempts.length).toBe(1);
         expect(attempts[0].request).toEqual(requests[0]);
-        expect(attempts[0].llm_response.content[0].text).toBe(
+        const response = asRecord(attempts[0].llm_response);
+        expect(asString(asRecords(response.content)[0].text)).toBe(
           '{"answers":{"positive":true}}',
         );
-        expect(attempts[0].debug_info.finish_reason).toBe(
+        const debugInfo = asRecord(attempts[0].debug_info);
+        expect(debugInfo.finish_reason).toBe(
           truncated ? "max_tokens" : "end_turn",
         );
-        expect("error" in attempts[0].debug_info).toBe(truncated);
+        expect("error" in debugInfo).toBe(truncated);
       }
     },
   );

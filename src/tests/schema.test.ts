@@ -1,3 +1,4 @@
+import type { Question as SdkQuestion } from "@typesafe-ai/sdk";
 import { expect, it } from "vitest";
 import {
   type AnswerMode,
@@ -8,6 +9,7 @@ import {
   validateOutput,
   validateQuestions,
 } from "../schema.js";
+import { asRecord } from "./testRecords.js";
 
 const SCHEMA_KEYWORDS = [
   "title",
@@ -28,12 +30,6 @@ const FIELD_NAMES = [
   "probability_0",
 ] as const;
 
-type QuestionsInput = Parameters<typeof validateQuestions>[0];
-type SdkQuestion = QuestionsInput["answer"];
-
-const asRecord = (value: unknown): Record<string, unknown> =>
-  value as Record<string, unknown>;
-
 const invalidDictionaryQuestions: readonly unknown[] = [
   { type: "unknown" },
   { type: "noul", instructions: 42 },
@@ -44,7 +40,7 @@ const invalidDictionaryQuestions: readonly unknown[] = [
 it.each(invalidDictionaryQuestions)(
   "rejects invalid dictionary questions %#",
   (question) => {
-    expect(() => validateQuestions({ answer: question } as never)).toThrow(
+    expect(() => validateQuestions({ answer: question })).toThrow(
       InvalidQuestionsError,
     );
   },
@@ -54,7 +50,7 @@ it("revalidates SDK question fields", () => {
   // The Python suite mutates an SDK model, but TypeScript has no mutable SDK
   // models, so the invalid field is passed through a plain object instead.
   const question = { type: "noul", criteria: { true: 42 } } as const;
-  expect(() => validateQuestions({ answer: question } as never)).toThrow(
+  expect(() => validateQuestions({ answer: question })).toThrow(
     InvalidQuestionsError,
   );
 });
