@@ -1,12 +1,16 @@
 import type {
   ChoiceQuestion,
+  ChoiceResponse,
   NoulQuestion,
+  NoulResponse,
   Questions,
   ResultFor,
   ScoreQuestion,
+  ScoreResponse,
   Usage,
 } from "@typesafe-ai/sdk";
 import type { LlmAttempt } from "./providers/base.js";
+import type { ProbabilityDebug } from "./utils/probabilityNormalization.js";
 
 /** Token usage of the final attempt alongside cumulative retry accounting. */
 interface AdapterUsage extends Usage {
@@ -17,18 +21,18 @@ interface AdapterUsage extends Usage {
   latency: number;
 }
 
-/** Diagnostics attached to responses and terminal errors. */
-interface AdapterDebug {
-  max_error: number;
-  invalid_probs: number;
-  probability_errors: Record<string, number>;
-  original_probabilities?: Record<string, Record<string, number>>;
+/**
+ * Diagnostics attached to responses and terminal errors: probability
+ * diagnostics plus attempt traces. A type alias (not an interface) so JSON
+ * serialization views accept it without a cast.
+ */
+type AdapterDebug = ProbabilityDebug & {
   llm_attempts: LlmAttempt[];
   retry_reasons: [string, string][];
-}
+};
 
-/** A TypeSafeError carrying attempt traces and retry reasons. */
-type DebuggedError = Error & { debug?: Record<string, unknown> };
+/** The SDK answer shapes produced for validated questions. */
+type SdkAnswer = NoulResponse | ScoreResponse | ChoiceResponse;
 
 /** Answers of noul questions, keyed by question name. */
 type NoulView<Q extends Questions> = {
@@ -72,12 +76,13 @@ interface SystemOneResponse<Q extends Questions = Questions> {
 
 /** Attach attempt traces and retry reasons to a terminal SDK error. */
 const attachDebug = (error: unknown, debug: Record<string, unknown>): void => {
-  if (error instanceof Error) (error as DebuggedError).debug = debug;
+  if (error instanceof Error) Object.assign(error, { debug });
 };
 
 export {
   type AdapterDebug,
   type AdapterUsage,
   attachDebug,
+  type SdkAnswer,
   type SystemOneResponse,
 };

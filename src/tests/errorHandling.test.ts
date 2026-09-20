@@ -70,9 +70,10 @@ describe("translateError", () => {
         const translated = translate(statusError(status, body));
         expect(translated, `status ${status}`).toBeInstanceOf(expected);
         expect(translated).toBeInstanceOf(APIError);
-        const apiError = translated as APIError;
-        expect(apiError.status).toBe(status);
-        expect(apiError.body).toEqual(body);
+        if (!(translated instanceof APIError))
+          throw new Error("expected an APIError");
+        expect(translated.status).toBe(status);
+        expect(translated.body).toEqual(body);
       }
     },
   );
@@ -117,7 +118,8 @@ describe("translating", () => {
       caught = error;
     }
     expect(caught).toBeInstanceOf(RateLimitError);
-    expect((caught as Error).cause).toBe(original);
+    if (!(caught instanceof Error)) throw new Error("expected an Error");
+    expect(caught.cause).toBe(original);
   });
 });
 

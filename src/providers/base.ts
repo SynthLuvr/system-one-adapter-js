@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { TypeSafeError } from "@typesafe-ai/sdk";
+import { TypeSafeError } from "@typesafe-ai/sdk";
+import { type ArkErrors, type } from "arktype";
 
 /** The provider an owned model name is built from. */
 type ProviderName = "openai" | "anthropic";
@@ -64,9 +65,9 @@ interface LlmAttempt {
 const attemptStorage = new AsyncLocalStorage<LlmAttempt>();
 
 /** Render messages into the role/content dictionaries the chat APIs expect. */
-const renderMessages = (
-  messages: readonly Message[],
-): { role: string; content: string }[] =>
+const renderMessages = <M extends Message>(
+  messages: readonly M[],
+): { role: M["role"]; content: string }[] =>
   messages.map((message) => ({ role: message.role, content: message.content }));
 
 /** The joined system-prompt text of a conversation. */
@@ -76,15 +77,48 @@ const systemPrompt = (messages: readonly Message[]): string =>
     .map((message) => message.content)
     .join("\n\n");
 
+/** A message from a speaker an API addresses by role, not the system prompt. */
+type ConversationalMessage = Message & { role: "user" | "assistant" };
+
 /** The non-system messages, for APIs that take the system prompt separately. */
-const conversation = (messages: readonly Message[]) =>
-  renderMessages(messages.filter((message) => message.role !== "system"));
+const conversation = (
+  messages: readonly Message[],
+): { role: "user" | "assistant"; content: string }[] =>
+  renderMessages(
+    messages.filter(
+      (message): message is ConversationalMessage => message.role !== "system",
+    ),
+  );
+
+/**
+ * Detect a `toJSON` snapshot method, including inherited ones. This is a
+ * capability probe on the response object rather than data validation, so
+ * arktype (which checks own properties) is not used here.
+ */
+const hasJsonSnapshot = (
+  value: unknown,
+): value is { toJSON: () => unknown } => {
+  if (typeof value !== "object" || value === null) return false;
+  return "toJSON" in value && typeof value.toJSON === "function";
+};
 
 /** Deep-copy a plain SDK response object for the attempt trace. */
 const snapshotResponse = (response: unknown): unknown => {
-  if (typeof (response as { toJSON?: unknown })?.toJSON === "function")
-    return structuredClone((response as { toJSON: () => unknown }).toJSON());
+  if (hasJsonSnapshot(response)) return structuredClone(response.toJSON());
   return structuredClone(response);
+};
+
+/** Parse a provider payload with an arktype type, or reject its shape. */
+const parsePayload = <t>(
+  parse: () => t | ArkErrors,
+  description: string,
+): t => {
+  const payload = parse();
+  if (payload instanceof type.errors)
+    throw new TypeSafeError(
+      `${description} did not match the expected shape:\n${payload.summary}`,
+    );
+  return payload;
 };
 
 /** Record a thrown error on its attempt trace. */
@@ -157,6 +191,7 @@ export {
   type ProviderName,
   type ProviderRequestOptions,
   type ProviderResult,
+  parsePayload,
   recordRequest,
   recordResponse,
   renderMessages,
