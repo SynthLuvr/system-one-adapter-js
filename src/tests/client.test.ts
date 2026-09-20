@@ -69,21 +69,6 @@ class FakeProvider implements Provider {
   }
 }
 
-const evaluate = (
-  options: {
-    structuredOutputs: boolean;
-    llmAnswerMode: "probabilities" | "discrete";
-  } & Record<string, unknown>,
-  provider: Provider,
-  request: Record<string, unknown>,
-): Promise<unknown> =>
-  new SystemOneAdapterClient(options as never).systemOne({
-    state: STATE,
-    questions: QUESTIONS,
-    model: provider,
-    ...request,
-  } as never);
-
 describe("client with a fake provider", () => {
   it.each([
     ["sdk-style questions", QUESTIONS],
@@ -540,6 +525,5 @@ describe("client with a fake provider", () => {
         model: "gpt-4o-mini",
       }),
     ).rejects.toThrow(/provider/);
-    expect(evaluate).toBeTypeOf("function");
   });
 });

@@ -12,6 +12,7 @@ import {
   type Message,
   type Provider,
   type ProviderName,
+  type ProviderRequestOptions,
   type ProviderResult,
 } from "./providers/index.js";
 import {
@@ -21,6 +22,7 @@ import {
   type SystemOneResponse,
 } from "./response.js";
 import {
+  answerLabels,
   buildOutputSpec,
   buildSchema,
   type OutputSpec,
@@ -40,7 +42,7 @@ import {
 } from "./utils/errorHandling.js";
 import {
   type AnswerMode,
-  normalizeProbabilitiesOfAllAnswers,
+  normalizeAnswerProbabilities,
   type ProbabilityNormalization,
   probabilityDebugData,
   rescaleProbabilities,
@@ -85,11 +87,40 @@ const extractJson = (text: string): string => {
   return stripped;
 };
 
+/** Parse the model's JSON payload, stripping Markdown fences. */
+const parseJson = (text: string): unknown => {
+  try {
+    return JSON.parse(extractJson(text));
+  } catch (error) {
+    throw new OutputValidationError([
+      `invalid JSON: ${(error as Error).message}`,
+    ]);
+  }
+};
+
+/** Parse and validate a model response against the output spec. */
+const decodeModelOutput = (
+  outputSpec: OutputSpec,
+  text: string,
+): Record<string, unknown> => validateOutput(outputSpec, parseJson(text));
+
 /** The corrective user message sent after a schema-validation failure. */
 const correctionPrompt = (error: OutputValidationError): string =>
   `The previous response did not match the required schema: ${error.message}\n` +
   "Return a single JSON object that matches the schema exactly, with no other " +
   "text.";
+
+/** Wrap a terminal output-validation failure in an SDK APIError. */
+const malformedOutputError = (error: OutputValidationError): APIError => {
+  const apiError = new APIError(
+    200,
+    error.message,
+    new Headers(),
+    error.message,
+  );
+  apiError.cause = error;
+  return apiError;
+};
 
 /** One typed answer plus its probability diagnostics. */
 interface ConvertedAnswer {
@@ -98,7 +129,7 @@ interface ConvertedAnswer {
 }
 
 /** Convert one validated LLM answer to the SDK answer shape. */
-const convertLlmValueToAnswer = (
+const convertLlmAnswer = (
   question: Question,
   value: unknown,
   llmAnswerMode: AnswerMode,
@@ -113,33 +144,28 @@ const convertLlmValueToAnswer = (
     };
   }
 
-  let answers: string[];
-  if (question.type === "score")
-    answers = question.criteria.map((_, score) => String(score));
-  else answers = Object.keys(question.criteria);
-
-  const normalization = normalizeProbabilitiesOfAllAnswers(
-    answers,
+  const labels = answerLabels(question);
+  const normalization = normalizeAnswerProbabilities(
+    labels,
     value,
     llmAnswerMode,
     { enabled: shouldNormalizeProbabilities },
   );
   const { probabilities } = normalization;
-  const probabilityList = answers.map((answer) => probabilities[answer]);
+  const probabilityList = labels.map((label) => probabilities[label]);
 
   if (question.type === "score") {
     // The score is an expected value, so it is only meaningful over a
     // distribution summing to 1; the reported probabilities are left untouched
     // when normalize_probabilities is disabled.
     const scoreDistribution = rescaleProbabilities(probabilities);
-    const score = answers.reduce(
-      (expected, answer, index) => expected + index * scoreDistribution[answer],
+    const score = labels.reduce(
+      (expected, label, index) => expected + index * scoreDistribution[label],
       0,
     );
     const legend: Record<string, unknown> = {};
-    question.criteria.forEach((criterion, score_) => {
-      legend[String(score_)] = criterion;
-    });
+    for (const [level, criterion] of question.criteria.entries())
+      legend[String(level)] = criterion;
     return {
       answer: {
         type: "score",
@@ -152,10 +178,10 @@ const convertLlmValueToAnswer = (
     };
   }
 
-  const choice = answers.reduce(
-    (best, answer) =>
-      probabilities[answer] > probabilities[best] ? answer : best,
-    answers[0],
+  const choice = labels.reduce(
+    (best, label) =>
+      probabilities[label] > probabilities[best] ? label : best,
+    labels[0],
   );
   return {
     answer: {
@@ -170,15 +196,6 @@ const convertLlmValueToAnswer = (
 
 /** State shared by one evaluation's provider attempts. */
 class EvaluationRun {
-  readonly modelName: string;
-  readonly questions: Record<string, Question>;
-  readonly outputSpec: OutputSpec;
-  readonly schema: Record<string, unknown>;
-  readonly structured: boolean;
-  readonly baseMessages: Message[];
-  readonly nRetryMalformedStructure: number;
-  readonly llmAnswerMode: AnswerMode;
-  readonly shouldNormalizeProbabilities: boolean;
   readonly retryReasons: RetryReason[] = [];
   readonly llmAttempts: LlmAttempt[] = [];
   inputTokensTotal = 0;
@@ -186,84 +203,20 @@ class EvaluationRun {
   nRetriesMalformedStructure = 0;
   readonly startedAt = performance.now();
 
-  constructor(init: {
-    modelName: string;
-    questions: Record<string, Question>;
-    outputSpec: OutputSpec;
-    schema: Record<string, unknown>;
-    structured: boolean;
-    baseMessages: Message[];
-    nRetryMalformedStructure: number;
-    llmAnswerMode: AnswerMode;
-    shouldNormalizeProbabilities: boolean;
-  }) {
-    this.modelName = init.modelName;
-    this.questions = init.questions;
-    this.outputSpec = init.outputSpec;
-    this.schema = init.schema;
-    this.structured = init.structured;
-    this.baseMessages = init.baseMessages;
-    this.nRetryMalformedStructure = init.nRetryMalformedStructure;
-    this.llmAnswerMode = init.llmAnswerMode;
-    this.shouldNormalizeProbabilities = init.shouldNormalizeProbabilities;
-  }
+  constructor(
+    readonly modelName: string,
+    readonly questions: Record<string, Question>,
+    readonly outputSpec: OutputSpec,
+    readonly requestOptions: ProviderRequestOptions,
+    readonly baseMessages: Message[],
+    readonly nRetryMalformedStructure: number,
+    readonly llmAnswerMode: AnswerMode,
+    readonly shouldNormalizeProbabilities: boolean,
+  ) {}
 
   #record(result: ProviderResult): void {
     this.inputTokensTotal += result.inputTokens;
     this.outputTokensTotal += result.outputTokens;
-  }
-
-  /** Decode a provider result, or queue a corrective retry. */
-  #decodeOrCorrect(
-    result: ProviderResult,
-    messages: Message[],
-    correctiveAttempt: number,
-  ): Record<string, unknown> | undefined {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(extractJson(result.text));
-    } catch (error) {
-      return this.#handleInvalid(
-        new OutputValidationError([
-          `invalid JSON: ${(error as Error).message}`,
-        ]),
-        result,
-        messages,
-        correctiveAttempt,
-      );
-    }
-    try {
-      return validateOutput(this.outputSpec, parsed);
-    } catch (error) {
-      if (!(error instanceof OutputValidationError)) throw error;
-      return this.#handleInvalid(error, result, messages, correctiveAttempt);
-    }
-  }
-
-  #handleInvalid(
-    error: OutputValidationError,
-    result: ProviderResult,
-    messages: Message[],
-    correctiveAttempt: number,
-  ): undefined {
-    if (correctiveAttempt === this.nRetryMalformedStructure) {
-      const apiError = new APIError(
-        200,
-        error.message,
-        new Headers(),
-        error.message,
-      );
-      apiError.cause = error;
-      throw apiError;
-    }
-    this.retryReasons.push({
-      category: "malformed_structure",
-      msg: error.message,
-    });
-    this.nRetriesMalformedStructure += 1;
-    messages.push({ role: "assistant", content: result.text });
-    messages.push({ role: "user", content: correctionPrompt(error) });
-    return undefined;
   }
 
   async #request(
@@ -274,15 +227,46 @@ class EvaluationRun {
       this.llmAttempts,
       provider,
       messages,
-      { schema: this.schema, structured: this.structured },
-      () =>
-        provider.request(messages, {
-          schema: this.schema,
-          structured: this.structured,
-        }),
+      this.requestOptions,
+      () => provider.request(messages, this.requestOptions),
     );
     if (attempt.llm_response === null) attempt.llm_response = { ...result };
     return result;
+  }
+
+  /** Decode a provider result, or queue a corrective retry. */
+  #decodeOrCorrect(
+    result: ProviderResult,
+    messages: Message[],
+    correctiveAttempt: number,
+  ): Record<string, unknown> | undefined {
+    let output: Record<string, unknown>;
+    try {
+      output = decodeModelOutput(this.outputSpec, result.text);
+    } catch (error) {
+      if (!(error instanceof OutputValidationError)) throw error;
+      return this.#correctOrThrow(error, result, messages, correctiveAttempt);
+    }
+    return output;
+  }
+
+  /** Queue a corrective retry, or raise when the allowance is spent. */
+  #correctOrThrow(
+    error: OutputValidationError,
+    result: ProviderResult,
+    messages: Message[],
+    correctiveAttempt: number,
+  ): undefined {
+    if (correctiveAttempt === this.nRetryMalformedStructure)
+      throw malformedOutputError(error);
+    this.retryReasons.push({
+      category: "malformed_structure",
+      msg: error.message,
+    });
+    this.nRetriesMalformedStructure += 1;
+    messages.push({ role: "assistant", content: result.text });
+    messages.push({ role: "user", content: correctionPrompt(error) });
+    return undefined;
   }
 
   /** Run provider attempts with transient retries and corrective retries. */
@@ -340,7 +324,7 @@ class EvaluationRun {
     const normalizations: Record<string, ProbabilityNormalization | undefined> =
       {};
     for (const [questionId, question] of Object.entries(this.questions)) {
-      const converted = convertLlmValueToAnswer(
+      const converted = convertLlmAnswer(
         question,
         output[questionId],
         this.llmAnswerMode,
@@ -495,20 +479,16 @@ class SystemOneAdapterClient {
   async close(): Promise<void> {
     if (this.#closeCompletion === undefined || this.#closeSettled) {
       this.#closed = true;
-      let resolveCompletion: () => void = noop;
-      let rejectCompletion: (reason: unknown) => void = noop;
-      this.#closeCompletion = new Promise<void>((resolve, reject) => {
-        resolveCompletion = resolve;
-        rejectCompletion = reject;
-      });
+      const completion = Promise.withResolvers<void>();
+      this.#closeCompletion = completion.promise;
       this.#closeSettled = false;
       // Mark the shared completion handled; waiters re-observe rejections.
-      this.#closeCompletion.catch(noop);
+      completion.promise.catch(noop);
       try {
         await this.#closeOwnedProviders();
-        resolveCompletion();
+        completion.resolve();
       } catch (error) {
-        rejectCompletion(error);
+        completion.reject(error);
       } finally {
         this.#closeSettled = true;
       }
@@ -530,15 +510,18 @@ class SystemOneAdapterClient {
     if (modelValue === undefined)
       throw new Error("An LLM model is required on the client or call.");
     if (typeof modelValue !== "string") return modelValue;
-    const provider = providerName ?? this.provider;
-    if (provider === undefined)
+    const name = providerName ?? this.provider;
+    if (name === undefined)
       throw new Error(
         "A provider is required: set provider='openai' or 'anthropic', or pass a provider instance as the model.",
       );
-    const key = `${provider}:${modelValue}`;
-    if (!this.#ownedProviders.has(key))
-      this.#ownedProviders.set(key, this.buildProvider(provider, modelValue));
-    return this.#ownedProviders.get(key) as Provider;
+    const key = `${name}:${modelValue}`;
+    let provider = this.#ownedProviders.get(key);
+    if (provider === undefined) {
+      provider = this.buildProvider(name, modelValue);
+      this.#ownedProviders.set(key, provider);
+    }
+    return provider;
   }
 
   #ensureOpen(): void {
@@ -547,15 +530,14 @@ class SystemOneAdapterClient {
 
   async #closeOwnedProviders(): Promise<void> {
     let firstError: unknown;
-    // Snapshot before iterating: entries are deleted as they close.
-    // oxlint-disable-next-line unicorn/no-useless-spread
-    for (const [key, provider] of [...this.#ownedProviders])
+    // Closing continues past failures; a failed entry stays so a later
+    // close() can retry it, and deleting the visited key is safe mid-iteration.
+    for (const [key, provider] of this.#ownedProviders)
       try {
         if ("close" in provider && typeof provider.close === "function")
           await provider.close();
         this.#ownedProviders.delete(key);
       } catch (error) {
-        // A failed cleanup must not prevent closing the remaining pools.
         if (firstError === undefined) firstError = error;
       }
 
@@ -577,31 +559,29 @@ class SystemOneAdapterClient {
         ? PROBABILITY_SYSTEM_PROMPT
         : DISCRETE_SYSTEM_PROMPT;
     if (!this.structuredOutputs)
-      systemPrompt += `\n\n${OUTPUT_SCHEMA_INSTRUCTION_TEMPLATE.replace("{schema}", JSON.stringify(schema))}`;
+      systemPrompt += `\n\n${OUTPUT_SCHEMA_INSTRUCTION_TEMPLATE.replace(
+        "{schema}",
+        JSON.stringify(schema),
+      )}`;
     const baseMessages: Message[] = [
       { role: "system", content: systemPrompt },
       { role: "user", content: serializeStateAsUserPrompt(state) },
     ];
-    return new EvaluationRun({
+    return new EvaluationRun(
       modelName,
-      questions: preparedQuestions,
+      preparedQuestions,
       outputSpec,
-      schema,
-      structured: this.structuredOutputs,
+      { schema, structured: this.structuredOutputs },
       baseMessages,
-      nRetryMalformedStructure: this.nRetryMalformedStructure,
-      llmAnswerMode: this.llmAnswerMode,
-      shouldNormalizeProbabilities: this.normalizeProbabilities,
-    });
+      this.nRetryMalformedStructure,
+      this.llmAnswerMode,
+      this.normalizeProbabilities,
+    );
   }
 }
 
 export {
-  correctionPrompt,
-  EvaluationRun,
-  extractJson,
   SystemOneAdapterClient,
   type SystemOneAdapterClientOptions,
   type SystemOneAdapterRequest,
-  serializeStateAsUserPrompt,
 };

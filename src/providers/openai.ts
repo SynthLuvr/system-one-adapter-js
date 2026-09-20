@@ -1,7 +1,4 @@
-import {
-  TypeSafeError,
-  APIUserAbortError as TypeSafeUserAbortError,
-} from "@typesafe-ai/sdk";
+import { TypeSafeError } from "@typesafe-ai/sdk";
 import OpenAI, {
   APIConnectionError,
   APIConnectionTimeoutError,
@@ -11,13 +8,11 @@ import OpenAI, {
 import type { ChatCompletionCreateParamsNonStreaming } from "openai/resources/chat/completions";
 import type { ResponseCreateParamsNonStreaming } from "openai/resources/responses/responses.js";
 import {
-  describeError,
-  toConnectionError,
-  toStatusError,
-  toTimeoutError,
+  providerErrorTranslator,
   translating,
 } from "../utils/errorHandling.js";
 import {
+  conversation,
   type Message,
   type Provider,
   type ProviderRequestOptions,
@@ -25,6 +20,7 @@ import {
   recordRequest,
   recordResponse,
   renderMessages,
+  systemPrompt,
 } from "./base.js";
 
 /** Which OpenAI-compatible API a provider calls. */
@@ -42,27 +38,22 @@ interface OpenAIProviderOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-/** Map an OpenAI SDK exception to an SDK error. */
-const translateError = (error: unknown): TypeSafeError => {
-  if (error instanceof TypeSafeError) return error;
-  if (error instanceof APIConnectionTimeoutError) return toTimeoutError(error);
-  if (error instanceof APIUserAbortError)
-    return new TypeSafeUserAbortError(undefined, { cause: error });
-  if (error instanceof APIConnectionError) return toConnectionError(error);
-  if (error instanceof APIError && typeof error.status === "number")
-    return toStatusError(error);
-  return new TypeSafeError(describeError(error));
-};
+/** Map an OpenAI SDK error to an SDK error. */
+const translateError = providerErrorTranslator({
+  timeout: APIConnectionTimeoutError,
+  userAbort: APIUserAbortError,
+  connection: APIConnectionError,
+  apiError: APIError,
+});
 
 /** The `response_format` for Chat Completions, or none when prompted. */
 const responseFormat = (
-  schema: Record<string, unknown>,
-  { structured }: { structured: boolean },
-): ChatCompletionCreateParamsNonStreaming["response_format"] => {
-  if (!structured) return undefined;
+  options: ProviderRequestOptions,
+): ChatCompletionCreateParamsNonStreaming["response_format"] | undefined => {
+  if (!options.structured) return undefined;
   return {
     type: "json_schema",
-    json_schema: { name: "evaluation", schema, strict: true },
+    json_schema: { name: "evaluation", schema: options.schema, strict: true },
   };
 };
 
@@ -70,31 +61,30 @@ const responseFormat = (
 const responsesRequest = (
   modelName: string,
   messages: readonly Message[],
-  schema: Record<string, unknown>,
-  { structured }: { structured: boolean },
+  options: ProviderRequestOptions,
 ): Record<string, unknown> => {
-  const outputFormat = structured
-    ? { type: "json_schema", name: "evaluation", schema, strict: true }
+  const format = options.structured
+    ? {
+        type: "json_schema",
+        name: "evaluation",
+        schema: options.schema,
+        strict: true,
+      }
     : { type: "json_object" };
-  const kwargs: Record<string, unknown> = {
+  const params: Record<string, unknown> = {
     model: modelName,
     input: renderMessages(messages),
-    text: { format: outputFormat },
+    text: { format },
     store: false,
   };
-  if (structured) {
-    kwargs.instructions = messages
-      .filter((message) => message.role === "system")
-      .map((message) => message.content)
-      .join("\n\n");
-    kwargs.input = renderMessages(
-      messages.filter((message) => message.role !== "system"),
-    );
+  if (options.structured) {
+    params.instructions = systemPrompt(messages);
+    params.input = conversation(messages);
   }
   // JSON mode requires a JSON instruction in `input`; the separate
   // `instructions` field does not satisfy the API's check, so prompted mode
-  // keeps system messages.
-  return kwargs;
+  // keeps system messages inside `input`.
+  return params;
 };
 
 /** One Responses API payload in the shape the provider reads. */
@@ -138,7 +128,9 @@ interface ChatCompletionPayload {
 
 /** Parse one Chat Completions payload. */
 const chatResult = (response: ChatCompletionPayload): ProviderResult => {
-  recordResponse(response, { finishReason: response.choices[0].finish_reason });
+  recordResponse(response, {
+    finishReason: response.choices[0].finish_reason,
+  });
   return {
     text: response.choices[0].message.content ?? "",
     inputTokens: response.usage.prompt_tokens,
@@ -183,50 +175,54 @@ class OpenAIProvider implements Provider {
     messages: readonly Message[],
     options: ProviderRequestOptions,
   ): Promise<ProviderResult> {
-    return translating(async () => {
-      if (this.api === "responses") {
-        const kwargs = responsesRequest(
-          this.modelName,
-          messages,
-          options.schema,
-          { structured: options.structured },
-        );
-        recordRequest(kwargs, { api: this.api });
-        const response = await this.client.responses.create(
-          kwargs as unknown as ResponseCreateParamsNonStreaming,
-        );
-        return responsesResult(response as unknown as ResponsesPayload);
-      }
-      const kwargs: Record<string, unknown> = {
-        model: this.modelName,
-        messages: renderMessages(messages),
-        response_format: responseFormat(options.schema, {
-          structured: options.structured,
-        }),
-      };
-      recordRequest(kwargs, { api: this.api });
-      const response = await this.client.chat.completions.create(
-        kwargs as unknown as ChatCompletionCreateParamsNonStreaming,
-      );
-      return chatResult(response as unknown as ChatCompletionPayload);
-    }, translateError);
+    return translating(
+      () =>
+        this.api === "responses"
+          ? this.#requestResponses(messages, options)
+          : this.#requestChat(messages, options),
+      translateError,
+    );
   }
 
-  /** Map an OpenAI SDK exception to an SDK error. */
+  async #requestResponses(
+    messages: readonly Message[],
+    options: ProviderRequestOptions,
+  ): Promise<ProviderResult> {
+    const params = responsesRequest(this.modelName, messages, options);
+    recordRequest(params, { api: this.api });
+    const response = await this.client.responses.create(
+      params as unknown as ResponseCreateParamsNonStreaming,
+    );
+    return responsesResult(response as unknown as ResponsesPayload);
+  }
+
+  async #requestChat(
+    messages: readonly Message[],
+    options: ProviderRequestOptions,
+  ): Promise<ProviderResult> {
+    const params = {
+      model: this.modelName,
+      messages: renderMessages(messages),
+      response_format: responseFormat(options),
+    };
+    recordRequest(params, { api: this.api });
+    const response = await this.client.chat.completions.create(
+      params as unknown as ChatCompletionCreateParamsNonStreaming,
+    );
+    return chatResult(response as unknown as ChatCompletionPayload);
+  }
+
+  /** Map an OpenAI SDK error to an SDK error. */
   translateError(error: unknown): TypeSafeError {
     return translateError(error);
   }
 }
 
 export {
-  type ChatCompletionPayload,
   chatResult,
   type OpenAIApi,
   OpenAIProvider,
-  type OpenAIProviderOptions,
-  type ResponsesPayload,
   responseFormat,
-  responsesRequest,
   responsesResult,
   translateError as translateOpenAIError,
 };

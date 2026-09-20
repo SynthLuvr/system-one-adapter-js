@@ -3,19 +3,17 @@ import type {
   SystemOneAdapterRequest,
 } from "./client.js";
 import { SystemOneAdapterClient } from "./client.js";
-import type {
-  LlmAttempt,
-  Message,
-  ProviderRequestOptions,
-  ProviderResult,
-} from "./providers/base.js";
 import {
   AnthropicProvider,
   buildProvider,
   type ClosableProvider,
+  type LlmAttempt,
+  type Message,
   OpenAIProvider,
   type Provider,
   type ProviderName,
+  type ProviderRequestOptions,
+  type ProviderResult,
 } from "./providers/index.js";
 import type {
   AdapterDebug,
@@ -44,10 +42,10 @@ export {
   score,
   TypeSafeError,
 } from "@typesafe-ai/sdk";
-export type { AnswerMode };
 export {
   type AdapterDebug,
   type AdapterUsage,
+  type AnswerMode,
   AnthropicProvider,
   buildProvider,
   type ClosableProvider,

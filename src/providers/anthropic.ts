@@ -4,24 +4,20 @@ import Anthropic, {
   APIError,
   APIUserAbortError,
 } from "@anthropic-ai/sdk";
+import { TypeSafeError } from "@typesafe-ai/sdk";
 import {
-  TypeSafeError,
-  APIUserAbortError as TypeSafeUserAbortError,
-} from "@typesafe-ai/sdk";
-import {
-  describeError,
-  toConnectionError,
-  toStatusError,
-  toTimeoutError,
+  providerErrorTranslator,
   translating,
 } from "../utils/errorHandling.js";
 import {
+  conversation,
   type Message,
   type Provider,
   type ProviderRequestOptions,
   type ProviderResult,
   recordRequest,
   recordResponse,
+  systemPrompt,
 } from "./base.js";
 
 /** Default maximum output tokens per Anthropic request. */
@@ -39,49 +35,23 @@ interface AnthropicProviderOptions {
   fetch?: typeof globalThis.fetch;
 }
 
-/** Map an Anthropic SDK exception to an SDK error. */
-const translateError = (error: unknown): TypeSafeError => {
-  if (error instanceof TypeSafeError) return error;
-  if (error instanceof APIConnectionTimeoutError) return toTimeoutError(error);
-  if (error instanceof APIUserAbortError)
-    return new TypeSafeUserAbortError(undefined, { cause: error });
-  if (error instanceof APIConnectionError) return toConnectionError(error);
-  if (error instanceof APIError && typeof error.status === "number")
-    return toStatusError(error);
-  return new TypeSafeError(describeError(error));
-};
+/** Map an Anthropic SDK error to an SDK error. */
+const translateError = providerErrorTranslator({
+  timeout: APIConnectionTimeoutError,
+  userAbort: APIUserAbortError,
+  connection: APIConnectionError,
+  apiError: APIError,
+});
 
-/** The request parameters for one Messages API call. */
-const requestKwargs = (
-  modelName: string,
-  messages: readonly Message[],
-  schema: Record<string, unknown>,
-  { structured, maxTokens }: { structured: boolean; maxTokens: number },
-): Record<string, unknown> => {
-  const system = messages
-    .filter((message) => message.role === "system")
-    .map((message) => message.content)
-    .join("\n\n");
-  const conversation = messages
-    .filter((message) => message.role !== "system")
-    .map((message) => ({ role: message.role, content: message.content }));
-  const kwargs: Record<string, unknown> = {
-    model: modelName,
-    max_tokens: maxTokens,
-    system,
-    messages: conversation,
-  };
-  if (structured)
-    kwargs.output_config = { format: { type: "json_schema", schema } };
-  return kwargs;
-};
-
-/** Parse one Messages API payload, rejecting truncated output. */
-const result = (response: {
+/** One Messages API payload in the shape the provider reads. */
+interface MessagesPayload {
   stop_reason: string | null;
   content: { type: string; text?: string }[];
   usage: { input_tokens: number; output_tokens: number };
-}): ProviderResult => {
+}
+
+/** Parse one Messages API payload, rejecting truncated output. */
+const anthropicResult = (response: MessagesPayload): ProviderResult => {
   recordResponse(response, { finishReason: response.stop_reason });
   if (response.stop_reason === "max_tokens")
     throw new TypeSafeError(
@@ -97,6 +67,26 @@ const result = (response: {
     inputTokens: response.usage.input_tokens,
     outputTokens: response.usage.output_tokens,
   };
+};
+
+/** The request parameters for one Messages API call. */
+const requestParams = (
+  modelName: string,
+  messages: readonly Message[],
+  options: ProviderRequestOptions,
+  maxTokens: number,
+): Record<string, unknown> => {
+  const params: Record<string, unknown> = {
+    model: modelName,
+    max_tokens: maxTokens,
+    system: systemPrompt(messages),
+    messages: conversation(messages),
+  };
+  if (options.structured)
+    params.output_config = {
+      format: { type: "json_schema", schema: options.schema },
+    };
+  return params;
 };
 
 /** Call the native Anthropic Messages API. */
@@ -129,25 +119,21 @@ class AnthropicProvider implements Provider {
     options: ProviderRequestOptions,
   ): Promise<ProviderResult> {
     return translating(async () => {
-      const kwargs = requestKwargs(this.modelName, messages, options.schema, {
-        structured: options.structured,
-        maxTokens: this.maxTokens,
-      });
-      recordRequest(kwargs, { api: "messages" });
+      const params = requestParams(
+        this.modelName,
+        messages,
+        options,
+        this.maxTokens,
+      );
+      recordRequest(params, { api: "messages" });
       const response = await this.client.messages.create(
-        kwargs as unknown as Parameters<typeof this.client.messages.create>[0],
+        params as unknown as Parameters<typeof this.client.messages.create>[0],
       );
-      return result(
-        response as unknown as {
-          stop_reason: string | null;
-          content: { type: string; text?: string }[];
-          usage: { input_tokens: number; output_tokens: number };
-        },
-      );
+      return anthropicResult(response as unknown as MessagesPayload);
     }, translateError);
   }
 
-  /** Map an Anthropic SDK exception to an SDK error. */
+  /** Map an Anthropic SDK error to an SDK error. */
   translateError(error: unknown): TypeSafeError {
     return translateError(error);
   }
@@ -155,9 +141,7 @@ class AnthropicProvider implements Provider {
 
 export {
   AnthropicProvider,
-  type AnthropicProviderOptions,
-  DEFAULT_MAX_TOKENS,
-  requestKwargs,
-  result as anthropicResult,
+  anthropicResult,
+  requestParams,
   translateError as translateAnthropicError,
 };

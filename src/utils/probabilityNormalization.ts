@@ -63,9 +63,9 @@ const rescaleProbabilities = (
   );
 };
 
-/** Build and optionally normalize a probability distribution. */
-const normalizeProbabilitiesOfAllAnswers = (
-  answers: readonly string[],
+/** Build and optionally normalize one answer's probability distribution. */
+const normalizeAnswerProbabilities = (
+  labels: readonly string[],
   value: unknown,
   answerMode: AnswerMode,
   { enabled }: { enabled: boolean },
@@ -73,14 +73,14 @@ const normalizeProbabilitiesOfAllAnswers = (
   if (answerMode === "discrete") {
     const selected = String(value);
     const probabilities = Object.fromEntries(
-      answers.map((answer) => [answer, answer === selected ? 1 : 0]),
+      labels.map((label) => [label, label === selected ? 1 : 0]),
     );
     return { probabilities, error: 0 };
   }
 
   const record = value as Record<string, unknown>;
   const originalProbabilities = Object.fromEntries(
-    answers.map((answer) => [answer, Number(record[answer])]),
+    labels.map((label) => [label, Number(record[label])]),
   );
   const total = Object.values(originalProbabilities).reduce(
     (sum, probability) => sum + probability,
@@ -90,14 +90,16 @@ const normalizeProbabilitiesOfAllAnswers = (
   if (!enabled || error <= PROBABILITY_TOLERANCE)
     return { probabilities: originalProbabilities, error };
 
-  const probabilities = rescaleProbabilities(originalProbabilities);
-  return { probabilities, error, originalProbabilities };
+  return {
+    probabilities: rescaleProbabilities(originalProbabilities),
+    error,
+    originalProbabilities,
+  };
 };
 
 export {
   type AnswerMode,
-  normalizeProbabilitiesOfAllAnswers,
-  PROBABILITY_TOLERANCE,
+  normalizeAnswerProbabilities,
   type ProbabilityNormalization,
   probabilityDebugData,
   rescaleProbabilities,

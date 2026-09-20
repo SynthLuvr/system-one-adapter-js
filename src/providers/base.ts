@@ -1,6 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { TypeSafeError } from "@typesafe-ai/sdk";
-import { translating } from "../utils/errorHandling.js";
+import type { TypeSafeError } from "@typesafe-ai/sdk";
 
 /** The provider an owned model name is built from. */
 type ProviderName = "openai" | "anthropic";
@@ -70,11 +69,30 @@ const renderMessages = (
 ): { role: string; content: string }[] =>
   messages.map((message) => ({ role: message.role, content: message.content }));
 
+/** The joined system-prompt text of a conversation. */
+const systemPrompt = (messages: readonly Message[]): string =>
+  messages
+    .filter((message) => message.role === "system")
+    .map((message) => message.content)
+    .join("\n\n");
+
+/** The non-system messages, for APIs that take the system prompt separately. */
+const conversation = (messages: readonly Message[]) =>
+  renderMessages(messages.filter((message) => message.role !== "system"));
+
 /** Deep-copy a plain SDK response object for the attempt trace. */
 const snapshotResponse = (response: unknown): unknown => {
   if (typeof (response as { toJSON?: unknown })?.toJSON === "function")
     return structuredClone((response as { toJSON: () => unknown }).toJSON());
   return structuredClone(response);
+};
+
+/** Record a thrown error on its attempt trace. */
+const recordFailure = (attempt: LlmAttempt, error: unknown): void => {
+  attempt.debug_info.error =
+    error instanceof Error ? error.message : String(error);
+  attempt.debug_info.error_type =
+    error instanceof Error ? error.name : typeof error;
 };
 
 /** Snapshot one provider call, including calls that raise before returning. */
@@ -102,10 +120,7 @@ const captureAttempt = async (
     try {
       return { attempt, result: await fn() };
     } catch (error) {
-      const described = error instanceof Error ? error.message : String(error);
-      attempt.debug_info.error = described;
-      attempt.debug_info.error_type =
-        error instanceof Error ? error.name : typeof error;
+      recordFailure(attempt, error);
       throw error;
     }
   });
@@ -135,6 +150,7 @@ const recordResponse = (
 export {
   type ClosableProvider,
   captureAttempt,
+  conversation,
   type LlmAttempt,
   type Message,
   type Provider,
@@ -144,5 +160,5 @@ export {
   recordRequest,
   recordResponse,
   renderMessages,
-  translating,
+  systemPrompt,
 };

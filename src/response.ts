@@ -3,13 +3,10 @@ import type {
   NoulQuestion,
   Questions,
   ResultFor,
-  RetryPolicy,
   ScoreQuestion,
   Usage,
 } from "@typesafe-ai/sdk";
 import type { LlmAttempt } from "./providers/base.js";
-import type { RetryReason } from "./utils/errorHandling.js";
-import type { AnswerMode } from "./utils/probabilityNormalization.js";
 
 /** Token usage of the final attempt alongside cumulative retry accounting. */
 interface AdapterUsage extends Usage {
@@ -81,13 +78,6 @@ const attachDebug = (error: unknown, debug: Record<string, unknown>): void => {
 export {
   type AdapterDebug,
   type AdapterUsage,
-  type AnswerMode,
   attachDebug,
-  type ChoiceView,
-  type DebuggedError,
-  type NoulView,
-  type RetryPolicy,
-  type RetryReason,
-  type ScoreView,
   type SystemOneResponse,
 };

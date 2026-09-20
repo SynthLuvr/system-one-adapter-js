@@ -2,6 +2,7 @@ import {
   APIConnectionError,
   APIError,
   APITimeoutError,
+  APIUserAbortError,
   type RetryPolicy,
   TypeSafeError,
 } from "@typesafe-ai/sdk";
@@ -50,6 +51,16 @@ const isRetryable = (error: TypeSafeError, policy: RetryPolicy): boolean => {
   return false;
 };
 
+/** Whether a failed attempt is an SDK error the budget still covers. */
+const shouldRetry = (
+  error: unknown,
+  attempt: number,
+  policy: RetryPolicy,
+): error is TypeSafeError =>
+  error instanceof TypeSafeError &&
+  isRetryable(error, policy) &&
+  attempt < policy.maxRetries;
+
 /** Parse `retry-after-ms` or `Retry-After` into milliseconds. */
 const parseRetryAfter = (
   headers: Headers,
@@ -97,6 +108,20 @@ const sleep = (ms: number): Promise<void> =>
 const errorHeaders = (error: TypeSafeError): Headers | undefined =>
   error instanceof APIError ? error.headers : undefined;
 
+/** Record the retry reason and wait out the backoff delay. */
+const waitForRetry = async (
+  error: TypeSafeError,
+  attempt: number,
+  policy: RetryPolicy,
+  retryReasons?: RetryReason[],
+): Promise<void> => {
+  retryReasons?.push({
+    category: "provider_error",
+    msg: describeError(error),
+  });
+  await sleep(retryDelayMs(attempt, errorHeaders(error), policy));
+};
+
 /** Result of one retried call. */
 interface RetryOutcome<T> {
   /** The value the call finally returned. */
@@ -111,24 +136,22 @@ const runWithRetries = async <T>(
   retry: RetryPolicy,
   retryReasons?: RetryReason[],
 ): Promise<RetryOutcome<T>> => {
-  for (let attempt = 0; ; attempt++) {
+  for (let attempt = 0; ; attempt++)
     try {
-      const result = await fn();
-      return { result, nRetries: attempt };
+      return { result: await fn(), nRetries: attempt };
     } catch (error) {
-      if (!(error instanceof TypeSafeError) || !isRetryable(error, retry))
-        throw error;
-      if (attempt >= retry.maxRetries) throw error;
-      retryReasons?.push({
-        category: "provider_error",
-        msg: describeError(error),
-      });
-      await sleep(retryDelayMs(attempt, errorHeaders(error), retry));
+      if (!shouldRetry(error, attempt, retry)) throw error;
+      await waitForRetry(error, attempt, retry, retryReasons);
     }
-  }
 };
 
-/** Re-raise any provider SDK error from the block as an SDK error. */
+/** Attach the original error as the cause of its translation. */
+const causedBy = <E extends Error>(error: E, cause: unknown): E => {
+  error.cause = cause;
+  return error;
+};
+
+/** Re-raise any provider error from the block as an SDK error. */
 const translating = async <T>(
   fn: () => Promise<T>,
   translate: (error: unknown) => TypeSafeError,
@@ -137,9 +160,7 @@ const translating = async <T>(
     return await fn();
   } catch (error) {
     if (error instanceof TypeSafeError) throw error;
-    const translated = translate(error);
-    translated.cause = error;
-    throw translated;
+    throw causedBy(translate(error), error);
   }
 };
 
@@ -163,15 +184,37 @@ const toStatusError = (error: {
     error.headers ?? new Headers(),
   );
 
+/** The error classes of one provider SDK, for translation to SDK errors. */
+interface ProviderErrorClasses {
+  timeout: abstract new (...args: never[]) => Error;
+  userAbort: abstract new (...args: never[]) => Error;
+  connection: abstract new (...args: never[]) => Error;
+  apiError: abstract new (
+    ...args: never[]
+  ) => Error & {
+    status?: number | undefined;
+  };
+}
+
+/** Build a translator mapping one provider SDK's errors onto SDK errors. */
+const providerErrorTranslator =
+  (classes: ProviderErrorClasses): ((error: unknown) => TypeSafeError) =>
+  (error: unknown): TypeSafeError => {
+    if (error instanceof TypeSafeError) return error;
+    if (error instanceof classes.timeout) return toTimeoutError(error);
+    if (error instanceof classes.userAbort)
+      return new APIUserAbortError(undefined, { cause: error });
+    if (error instanceof classes.connection) return toConnectionError(error);
+    if (error instanceof classes.apiError && typeof error.status === "number")
+      return toStatusError(error);
+    return new TypeSafeError(describeError(error));
+  };
+
 export {
-  DEFAULT_RETRY_POLICY,
-  describeError,
-  type RetryOutcome,
+  type ProviderErrorClasses,
+  providerErrorTranslator,
   type RetryReason,
   resolveRetryPolicy,
   runWithRetries,
-  toConnectionError,
-  toStatusError,
-  toTimeoutError,
   translating,
 };

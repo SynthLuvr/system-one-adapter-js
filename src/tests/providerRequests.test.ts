@@ -4,7 +4,7 @@ import { SystemOneAdapterClient } from "../client.js";
 import {
   AnthropicProvider,
   anthropicResult,
-  requestKwargs,
+  requestParams,
 } from "../providers/anthropic.js";
 import type { Message } from "../providers/base.js";
 import { chatResult, responseFormat } from "../providers/openai.js";
@@ -31,14 +31,16 @@ afterEach(() => {
 
 describe("provider request building and parsing", () => {
   it("wraps the schema in a native chat response format", () => {
-    expect(responseFormat(SCHEMA, { structured: true })).toEqual({
+    expect(responseFormat({ schema: SCHEMA, structured: true })).toEqual({
       type: "json_schema",
       json_schema: { name: "evaluation", schema: SCHEMA, strict: true },
     });
   });
 
   it("sends no chat response format when prompted", () => {
-    expect(responseFormat(SCHEMA, { structured: false })).toBeUndefined();
+    expect(
+      responseFormat({ schema: SCHEMA, structured: false }),
+    ).toBeUndefined();
   });
 
   it("reads chat completion content and usage", () => {
@@ -53,26 +55,36 @@ describe("provider request building and parsing", () => {
   });
 
   it("puts the schema in the anthropic output config when structured", () => {
-    const kwargs = requestKwargs("claude-haiku-4-5", MESSAGES, SCHEMA, {
-      structured: true,
-      maxTokens: 4096,
-    });
-    expect(kwargs.system).toBe("system prompt");
-    expect(kwargs.messages).toEqual([
+    const params = requestParams(
+      "claude-haiku-4-5",
+      MESSAGES,
+      {
+        schema: SCHEMA,
+        structured: true,
+      },
+      4096,
+    );
+    expect(params.system).toBe("system prompt");
+    expect(params.messages).toEqual([
       { role: "user", content: "the document" },
     ]);
-    expect(kwargs.max_tokens).toBeGreaterThan(0);
-    expect(kwargs.output_config).toEqual({
+    expect(params.max_tokens).toBeGreaterThan(0);
+    expect(params.output_config).toEqual({
       format: { type: "json_schema", schema: SCHEMA },
     });
   });
 
   it("omits the anthropic output config when prompted", () => {
-    const kwargs = requestKwargs("claude-haiku-4-5", MESSAGES, SCHEMA, {
-      structured: false,
-      maxTokens: 4096,
-    });
-    expect("output_config" in kwargs).toBe(false);
+    const params = requestParams(
+      "claude-haiku-4-5",
+      MESSAGES,
+      {
+        schema: SCHEMA,
+        structured: false,
+      },
+      4096,
+    );
+    expect("output_config" in params).toBe(false);
   });
 
   it("joins anthropic text blocks and reads usage", () => {

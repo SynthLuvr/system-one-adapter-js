@@ -1,9 +1,5 @@
 import { AnthropicProvider } from "./anthropic.js";
-import {
-  type ClosableProvider,
-  type Provider,
-  type ProviderName,
-} from "./base.js";
+import type { ClosableProvider, Provider, ProviderName } from "./base.js";
 import { OpenAIProvider } from "./openai.js";
 
 /** Build the provider named by a model selector. */
@@ -21,10 +17,6 @@ export {
   type Message,
   type ProviderRequestOptions,
   type ProviderResult,
-  recordRequest,
-  recordResponse,
-  renderMessages,
-  translating,
 } from "./base.js";
 export {
   AnthropicProvider,

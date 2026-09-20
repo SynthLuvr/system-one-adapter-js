@@ -15,6 +15,9 @@ type Question =
       criteria: Record<string, EntryType>;
     };
 
+/** A question that offers more than one outcome to choose between. */
+type GradedQuestion = Exclude<Question, { type: "noul" }>;
+
 /** A JSON schema object as sent to providers. */
 type JsonSchema = Record<string, unknown>;
 
@@ -46,6 +49,49 @@ const isEntryType = (value: unknown): value is EntryType =>
   isPlainObject(value) ||
   Array.isArray(value);
 
+/** Require an instruction or criterion value, or throw where it was invalid. */
+const expectEntryType = (value: unknown, where: string): EntryType => {
+  if (!isEntryType(value))
+    throw new InvalidQuestionsError(
+      `${where}: expected text, a JSON value, or null`,
+    );
+  return value;
+};
+
+/** Validate a noul question's optional true/false criteria. */
+const noulCriteria = (
+  value: unknown,
+  where: string,
+): { true?: EntryType; false?: EntryType } => {
+  if (!isPlainObject(value))
+    throw new InvalidQuestionsError(`${where}.criteria: expected an object`);
+  for (const key of ["true", "false"] as const)
+    if (value[key] !== undefined)
+      expectEntryType(value[key], `${where}.criteria.${key}`);
+  return value as { true?: EntryType; false?: EntryType };
+};
+
+/** Validate a score question's ordered criteria. */
+const scoreCriteria = (value: unknown, where: string): EntryType[] => {
+  if (!Array.isArray(value))
+    throw new InvalidQuestionsError(`${where}.criteria: expected an array`);
+  for (const [index, criterion] of value.entries())
+    expectEntryType(criterion, `${where}.criteria.${index}`);
+  return value;
+};
+
+/** Validate a choice question's labeled criteria. */
+const choiceCriteria = (
+  value: unknown,
+  where: string,
+): Record<string, EntryType> => {
+  if (!isPlainObject(value))
+    throw new InvalidQuestionsError(`${where}.criteria: expected an object`);
+  for (const [label, criterion] of Object.entries(value))
+    expectEntryType(criterion, `${where}.criteria.${JSON.stringify(label)}`);
+  return value as Record<string, EntryType>;
+};
+
 /** Validate one question value against the SDK question schema. */
 const validateQuestion = (questionId: string, value: unknown): Question => {
   const where = `questions.${questionId}`;
@@ -59,60 +105,28 @@ const validateQuestion = (questionId: string, value: unknown): Question => {
     throw new InvalidQuestionsError(
       `${where}.type: expected "noul", "score", or "choice"`,
     );
-  if (value.instructions !== undefined && !isEntryType(value.instructions))
-    throw new InvalidQuestionsError(
-      `${where}.instructions: expected text, a JSON value, or null`,
-    );
-  if (value.type === "noul") {
-    if (value.criteria !== undefined && value.criteria !== null) {
-      if (!isPlainObject(value.criteria))
-        throw new InvalidQuestionsError(
-          `${where}.criteria: expected an object`,
-        );
-      for (const key of ["true", "false"] as const)
-        if (
-          value.criteria[key] !== undefined &&
-          !isEntryType(value.criteria[key])
-        )
-          throw new InvalidQuestionsError(
-            `${where}.criteria.${key}: expected text, a JSON value, or null`,
-          );
-    }
+  if (value.instructions !== undefined)
+    expectEntryType(value.instructions, `${where}.instructions`);
+  const instructions = (value.instructions ?? null) as EntryType | null;
+  if (value.type === "noul")
     return {
       type: "noul",
-      instructions: value.instructions ?? null,
+      instructions,
       criteria:
-        (value.criteria as
-          | { true?: EntryType; false?: EntryType }
-          | null
-          | undefined) ?? null,
+        value.criteria === null || value.criteria === undefined
+          ? null
+          : noulCriteria(value.criteria, where),
     };
-  }
-  if (value.type === "score") {
-    if (!Array.isArray(value.criteria))
-      throw new InvalidQuestionsError(`${where}.criteria: expected an array`);
-    for (const [index, criterion] of value.criteria.entries())
-      if (!isEntryType(criterion))
-        throw new InvalidQuestionsError(
-          `${where}.criteria.${index}: expected text, a JSON value, or null`,
-        );
+  if (value.type === "score")
     return {
       type: "score",
-      instructions: value.instructions ?? null,
-      criteria: value.criteria,
+      instructions,
+      criteria: scoreCriteria(value.criteria, where),
     };
-  }
-  if (!isPlainObject(value.criteria))
-    throw new InvalidQuestionsError(`${where}.criteria: expected an object`);
-  for (const [label, criterion] of Object.entries(value.criteria))
-    if (!isEntryType(criterion))
-      throw new InvalidQuestionsError(
-        `${where}.criteria.${JSON.stringify(label)}: expected text, a JSON value, or null`,
-      );
   return {
     type: "choice",
-    instructions: value.instructions ?? null,
-    criteria: value.criteria as Record<string, EntryType>,
+    instructions,
+    criteria: choiceCriteria(value.criteria, where),
   };
 };
 
@@ -144,6 +158,21 @@ const serializeInstructionValue = (value: unknown): string => {
   if (typeof value === "string") return value;
   return JSON.stringify(value);
 };
+
+/** The ordered answer labels of a score or choice question. */
+const answerLabels = (question: GradedQuestion): string[] =>
+  question.type === "score"
+    ? question.criteria.map((_, score) => String(score))
+    : Object.keys(question.criteria);
+
+/** The criteria of a score or choice question, keyed by answer label. */
+const criteriaByLabel = (question: GradedQuestion): [string, EntryType][] =>
+  question.type === "score"
+    ? question.criteria.map((criterion, score): [string, EntryType] => [
+        String(score),
+        criterion,
+      ])
+    : Object.entries(question.criteria);
 
 /** The per-question description used on probability-map definitions. */
 const questionDescription = (question: Question, mode: AnswerMode): string => {
@@ -227,17 +256,14 @@ const answerSpecForQuestion = (
 ): AnswerSpec => {
   if (question.type === "noul")
     return mode === "discrete" ? { kind: "boolean" } : { kind: "probability" };
-  if (question.type === "score") {
-    if (mode === "discrete")
-      return { kind: "integer", max: question.criteria.length };
-    return {
-      kind: "probabilityMap",
-      labels: question.criteria.map((_, score) => String(score)),
-    };
-  }
-  const labels = Object.keys(question.criteria);
-  if (mode === "discrete") return { kind: "enum", values: labels };
-  return { kind: "probabilityMap", labels };
+  const labels = answerLabels(question);
+  if (question.type === "score")
+    return mode === "discrete"
+      ? { kind: "integer", max: question.criteria.length }
+      : { kind: "probabilityMap", labels };
+  return mode === "discrete"
+    ? { kind: "enum", values: labels }
+    : { kind: "probabilityMap", labels };
 };
 
 /** Build the per-request output spec for the given questions and answer mode. */
@@ -258,16 +284,9 @@ const buildOutputSpec = (
     spec.answers[questionId] = answerSpec;
     if (answerSpec.kind === "probabilityMap") {
       const properties: Record<string, string> = {};
-      const criteria: [string, EntryType][] =
-        question.type === "score"
-          ? question.criteria.map((criterion, score) => [
-              String(score),
-              criterion,
-            ])
-          : question.type === "choice"
-            ? Object.entries(question.criteria)
-            : [];
-      for (const [label, criterion] of criteria)
+      for (const [label, criterion] of criteriaByLabel(
+        question as GradedQuestion,
+      ))
         properties[label] = serializeInstructionValue(criterion);
       spec.probabilityMaps[`ProbabilityMap${index}`] = {
         description: questionDescription(question, llmAnswerMode),
@@ -278,6 +297,26 @@ const buildOutputSpec = (
     }
   }
   return spec;
+};
+
+/** The JSON schema of one answer field. */
+const answerSchema = (
+  answerSpec: AnswerSpec,
+  description: string | undefined,
+  index: number,
+): JsonSchema => {
+  switch (answerSpec.kind) {
+    case "probabilityMap":
+      return { $ref: `#/$defs/ProbabilityMap${index}` };
+    case "boolean":
+      return { description, type: "boolean" };
+    case "probability":
+      return { description, type: "number" };
+    case "integer":
+      return { description, type: "integer" };
+    case "enum":
+      return { description, type: "string", enum: answerSpec.values };
+  }
 };
 
 /** Create the self-contained JSON schema for one request's answers. */
@@ -297,32 +336,12 @@ const buildSchema = (spec: OutputSpec): JsonSchema => {
   }
 
   const answerProperties: Record<string, JsonSchema> = {};
-  for (const [index, questionId] of spec.questionIds.entries()) {
-    const answerSpec = spec.answers[questionId];
-    if (answerSpec.kind === "probabilityMap")
-      answerProperties[questionId] = { $ref: `#/$defs/ProbabilityMap${index}` };
-    else if (answerSpec.kind === "boolean")
-      answerProperties[questionId] = {
-        description: spec.descriptions[questionId],
-        type: "boolean",
-      };
-    else if (answerSpec.kind === "probability")
-      answerProperties[questionId] = {
-        description: spec.descriptions[questionId],
-        type: "number",
-      };
-    else if (answerSpec.kind === "integer")
-      answerProperties[questionId] = {
-        description: spec.descriptions[questionId],
-        type: "integer",
-      };
-    else
-      answerProperties[questionId] = {
-        description: spec.descriptions[questionId],
-        type: "string",
-        enum: answerSpec.values,
-      };
-  }
+  for (const [index, questionId] of spec.questionIds.entries())
+    answerProperties[questionId] = answerSchema(
+      spec.answers[questionId],
+      spec.descriptions[questionId],
+      index,
+    );
 
   defs.TypeSafeAnswers = {
     description:
@@ -356,6 +375,34 @@ const describeValue = (value: unknown): string => {
   return `${json} (${type})`;
 };
 
+/** Check a probability map has exactly the required labels, each in [0, 1]. */
+const validateProbabilityMap = (
+  labels: readonly string[],
+  value: unknown,
+  where: string,
+  issues: string[],
+): void => {
+  if (!isPlainObject(value)) {
+    issues.push(`${where}: expected an object, got ${describeValue(value)}`);
+    return;
+  }
+  for (const label of labels)
+    if (!(label in value))
+      issues.push(
+        `${where}: missing required property ${JSON.stringify(label)}`,
+      );
+  for (const key of Object.keys(value))
+    if (!labels.includes(key))
+      issues.push(
+        `${where}: extra property ${JSON.stringify(key)} is not allowed`,
+      );
+  for (const label of labels)
+    if (label in value && !isProbability(value[label]))
+      issues.push(
+        `${where}.${label}: expected a number between 0 and 1, got ${describeValue(value[label])}`,
+      );
+};
+
 /** Validate one answer value against its spec, appending any issues. */
 const validateAnswerValue = (
   questionId: string,
@@ -364,58 +411,40 @@ const validateAnswerValue = (
   issues: string[],
 ): void => {
   const where = `answers.${questionId}`;
-  if (spec.kind === "boolean") {
-    if (typeof value !== "boolean")
-      issues.push(
-        `${where}: expected true or false, got ${describeValue(value)}`,
-      );
-    return;
+  switch (spec.kind) {
+    case "boolean":
+      if (typeof value !== "boolean")
+        issues.push(
+          `${where}: expected true or false, got ${describeValue(value)}`,
+        );
+      return;
+    case "probability":
+      if (!isProbability(value))
+        issues.push(
+          `${where}: expected a number between 0 and 1, got ${describeValue(value)}`,
+        );
+      return;
+    case "integer":
+      if (
+        typeof value !== "number" ||
+        !Number.isInteger(value) ||
+        value < 0 ||
+        value >= spec.max
+      )
+        issues.push(
+          `${where}: expected an integer in [0, ${spec.max}), got ${describeValue(value)}`,
+        );
+      return;
+    case "enum":
+      if (typeof value !== "string" || !spec.values.includes(value))
+        issues.push(
+          `${where}: expected one of ${JSON.stringify(spec.values)}, got ${describeValue(value)}`,
+        );
+      return;
+    case "probabilityMap":
+      validateProbabilityMap(spec.labels, value, where, issues);
+      return;
   }
-  if (spec.kind === "probability") {
-    if (!isProbability(value))
-      issues.push(
-        `${where}: expected a number between 0 and 1, got ${describeValue(value)}`,
-      );
-    return;
-  }
-  if (spec.kind === "integer") {
-    if (
-      typeof value !== "number" ||
-      !Number.isInteger(value) ||
-      value < 0 ||
-      value >= spec.max
-    )
-      issues.push(
-        `${where}: expected an integer in [0, ${spec.max}), got ${describeValue(value)}`,
-      );
-    return;
-  }
-  if (spec.kind === "enum") {
-    if (typeof value !== "string" || !spec.values.includes(value))
-      issues.push(
-        `${where}: expected one of ${JSON.stringify(spec.values)}, got ${describeValue(value)}`,
-      );
-    return;
-  }
-  if (!isPlainObject(value)) {
-    issues.push(`${where}: expected an object, got ${describeValue(value)}`);
-    return;
-  }
-  for (const label of spec.labels)
-    if (!(label in value))
-      issues.push(
-        `${where}: missing required property ${JSON.stringify(label)}`,
-      );
-  for (const key of Object.keys(value))
-    if (!spec.labels.includes(key))
-      issues.push(
-        `${where}: extra property ${JSON.stringify(key)} is not allowed`,
-      );
-  for (const label of spec.labels)
-    if (label in value && !isProbability(value[label]))
-      issues.push(
-        `${where}.${label}: expected a number between 0 and 1, got ${describeValue(value[label])}`,
-      );
 };
 
 /** Validate a parsed model response against the output spec. */
@@ -465,6 +494,7 @@ const validateOutput = (
 export {
   type AnswerMode,
   type AnswerSpec,
+  answerLabels,
   buildOutputSpec,
   buildSchema,
   InvalidQuestionsError,

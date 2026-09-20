@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  normalizeProbabilitiesOfAllAnswers,
+  normalizeAnswerProbabilities,
   probabilityDebugData,
 } from "../utils/probabilityNormalization.js";
 
@@ -66,13 +66,13 @@ describe("probability normalization and debug data", () => {
       };
       const probabilityNormalizations = {
         positive: undefined,
-        stars: normalizeProbabilitiesOfAllAnswers(
+        stars: normalizeAnswerProbabilities(
           ["0", "1"],
           scoreProbabilities,
           "probabilities",
           { enabled },
         ),
-        genre: normalizeProbabilitiesOfAllAnswers(
+        genre: normalizeAnswerProbabilities(
           ["fiction", "nonfiction"],
           choiceProbabilities,
           "probabilities",
