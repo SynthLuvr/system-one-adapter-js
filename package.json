@@ -1,0 +1,31 @@
+{
+  "name": "system-one-adapter",
+  "version": "0.3.0",
+  "description": "Drop-in TypeSafeClient replacement backed by LLM APIs",
+  "license": "MIT",
+  "type": "module",
+  "private": true,
+  "packageManager": "pnpm@12.3.4",
+  "engines": {
+    "node": "==26"
+  },
+  "scripts": {
+    "build": "tsc",
+    "format": "ts-canon format",
+    "lint": "ts-canon lint",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.127.0",
+    "@typesafe-ai/sdk": "^0.6.0",
+    "openai": "^7.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "@vitest/coverage-v8": "^5.0.0",
+    "ts-canon": "^0.1.5",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.0"
+  }
+}
