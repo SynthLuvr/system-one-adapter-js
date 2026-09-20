@@ -21,6 +21,7 @@ import {
   type Provider,
   type ProviderRequestOptions,
   type ProviderResult,
+  parsePayload,
   recordRequest,
   recordResponse,
   renderMessages,
@@ -49,9 +50,6 @@ const translateError = providerErrorTranslator({
   connection: APIConnectionError,
   apiError: APIError,
 });
-
-/** arktype type of the APIs an OpenAI provider can call. */
-const Api = type("'responses'|'chat_completions'");
 
 /** Runtime validation of the API payloads this provider reads. */
 const payloadTypes = scope({
@@ -131,28 +129,22 @@ const responsesRequest = (
 
 /** Parse one Responses API payload, rejecting unfinished responses. */
 const responsesResult = (response: unknown): ProviderResult => {
-  const payload = payloadTypes.ResponsesPayload(response);
-  if (payload instanceof type.errors)
-    throw new TypeSafeError(
-      `OpenAI response did not match the expected shape:\n${payload.summary}`,
-    );
+  const payload = parsePayload(
+    () => payloadTypes.ResponsesPayload(response),
+    "OpenAI response",
+  );
   recordResponse(response, { finishReason: payload.status });
   if (payload.status !== "completed") {
     let reason: string = payload.status;
-    if (payload.error !== null && payload.error !== undefined)
-      reason = payload.error.message ?? reason;
-    else if (
-      payload.incomplete_details !== null &&
-      payload.incomplete_details !== undefined
-    )
+    if (payload.error != null) reason = payload.error.message ?? reason;
+    else if (payload.incomplete_details != null)
       reason = payload.incomplete_details.reason ?? reason;
     throw new TypeSafeError(`OpenAI response did not complete: ${reason}.`);
   }
-  const usage = payloadTypes.ResponsesUsage(payload.usage);
-  if (usage instanceof type.errors)
-    throw new TypeSafeError(
-      `OpenAI response usage did not match the expected shape:\n${usage.summary}`,
-    );
+  const usage = parsePayload(
+    () => payloadTypes.ResponsesUsage(payload.usage),
+    "OpenAI response usage",
+  );
   return {
     text: payload.output_text,
     inputTokens: usage.input_tokens,
@@ -162,11 +154,10 @@ const responsesResult = (response: unknown): ProviderResult => {
 
 /** Parse one Chat Completions payload. */
 const chatResult = (response: unknown): ProviderResult => {
-  const payload = payloadTypes.ChatPayload(response);
-  if (payload instanceof type.errors)
-    throw new TypeSafeError(
-      `OpenAI chat completion did not match the expected shape:\n${payload.summary}`,
-    );
+  const payload = parsePayload(
+    () => payloadTypes.ChatPayload(response),
+    "OpenAI chat completion",
+  );
   const [choice] = payload.choices;
   recordResponse(response, { finishReason: choice.finish_reason });
   return {
@@ -176,6 +167,22 @@ const chatResult = (response: unknown): ProviderResult => {
   };
 };
 
+/** Resolve the API option, defaulting by endpoint host. */
+const resolveApi = (
+  option: OpenAIApi | undefined,
+  baseURL: string,
+): OpenAIApi => {
+  if (option !== undefined) {
+    const api = type("'responses'|'chat_completions'")(option);
+    if (api instanceof type.errors)
+      throw new Error("api must be 'responses' or 'chat_completions'");
+    return api;
+  }
+  return new URL(baseURL).host === "api.openai.com"
+    ? "responses"
+    : "chat_completions";
+};
+
 /** Call the OpenAI Responses API or an OpenAI-compatible chat API. */
 class OpenAIProvider implements Provider {
   readonly modelName: string;
@@ -183,13 +190,6 @@ class OpenAIProvider implements Provider {
   readonly client: OpenAI;
 
   constructor(modelName: string, options: OpenAIProviderOptions = {}) {
-    let selected: OpenAIApi | undefined;
-    if (options.api !== undefined) {
-      const api = Api(options.api);
-      if (api instanceof type.errors)
-        throw new Error("api must be 'responses' or 'chat_completions'");
-      selected = api;
-    }
     this.modelName = modelName;
     this.client = new OpenAI({
       baseURL: options.baseUrl,
@@ -197,11 +197,7 @@ class OpenAIProvider implements Provider {
       maxRetries: 0,
       fetch: options.fetch,
     });
-    this.api =
-      selected ??
-      (new URL(this.client.baseURL).host === "api.openai.com"
-        ? "responses"
-        : "chat_completions");
+    this.api = resolveApi(options.api, this.client.baseURL);
   }
 
   /** No-op: this SDK version owns no connection pool to release. */

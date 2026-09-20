@@ -10,6 +10,7 @@ import type {
   Usage,
 } from "@typesafe-ai/sdk";
 import type { LlmAttempt } from "./providers/base.js";
+import type { ProbabilityDebug } from "./utils/probabilityNormalization.js";
 
 /** Token usage of the final attempt alongside cumulative retry accounting. */
 interface AdapterUsage extends Usage {
@@ -21,16 +22,11 @@ interface AdapterUsage extends Usage {
 }
 
 /**
- * Diagnostics attached to responses and terminal errors.
- *
- * A type alias (not an interface) so JSON serialization views can accept it
- * without an unsafe cast.
+ * Diagnostics attached to responses and terminal errors: probability
+ * diagnostics plus attempt traces. A type alias (not an interface) so JSON
+ * serialization views accept it without a cast.
  */
-type AdapterDebug = {
-  max_error: number;
-  invalid_probs: number;
-  probability_errors: Record<string, number>;
-  original_probabilities?: Record<string, Record<string, number>>;
+type AdapterDebug = ProbabilityDebug & {
   llm_attempts: LlmAttempt[];
   retry_reasons: [string, string][];
 };

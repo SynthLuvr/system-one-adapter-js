@@ -1,64 +1,46 @@
-import { type } from "arktype";
+import { type ArkErrors, type } from "arktype";
 
-/** arktype type of a JSON record with unknown values. */
+/** A recorded JSON object with unknown values. */
 const JsonRecord = type({ "[string]": "unknown" });
 
-/** arktype type of an array of JSON records. */
-const JsonRecordArray = JsonRecord.array();
-
-/** arktype type of a string value. */
-const StringValue = type("string");
-
-/** arktype type of a provider-neutral chat message. */
+/** A provider-neutral chat message. */
 const ProviderMessage = type({
   role: "'system'|'user'|'assistant'",
   content: "string",
 });
 
-/** arktype type of an error or response carrying attached debug data. */
+/** A value carrying attached debug data. */
 const DebugCarrier = type({ debug: JsonRecord });
 
-/** Validate an unknown value as a JSON record, throwing on mismatch. */
-const asRecord = (value: unknown): Record<string, unknown> => {
-  const record = JsonRecord(value);
-  if (record instanceof type.errors)
-    throw new Error(`Expected a JSON record: ${record.summary}`);
-  return record;
-};
-
-/** Validate an unknown value as an array of JSON records. */
-const asRecords = (value: unknown): Record<string, unknown>[] => {
-  const records = JsonRecordArray(value);
-  if (records instanceof type.errors)
-    throw new Error(`Expected JSON records: ${records.summary}`);
-  return records;
-};
-
-/** Read the debug data attached to an adapter error or response. */
-const debugOf = (value: unknown): Record<string, unknown> => {
-  const carrier = DebugCarrier(value);
-  if (carrier instanceof type.errors)
-    throw new Error(`Expected attached debug data: ${carrier.summary}`);
-  return carrier.debug;
-};
-
-/** Validate an unknown value as a string, throwing on mismatch. */
-const asString = (value: unknown): string => {
-  const result = StringValue(value);
+/** Validate a value with an arktype check, throwing a summary on mismatch. */
+const validated = <t>(check: () => t | ArkErrors, expected: string): t => {
+  const result = check();
   if (result instanceof type.errors)
-    throw new Error(`Expected a string: ${result.summary}`);
+    throw new Error(`Expected ${expected}: ${result.summary}`);
   return result;
 };
+
+/** Validate an unknown value as a JSON record, throwing on mismatch. */
+const asRecord = (value: unknown): Record<string, unknown> =>
+  validated(() => JsonRecord(value), "a JSON record");
+
+/** Validate an unknown value as an array of JSON records. */
+const asRecords = (value: unknown): Record<string, unknown>[] =>
+  validated(() => JsonRecord.array()(value), "JSON records");
+
+/** Validate an unknown value as a string, throwing on mismatch. */
+const asString = (value: unknown): string =>
+  validated(() => type("string")(value), "a string");
 
 /** Validate an unknown value as a provider-neutral chat message. */
 const asMessage = (
   value: unknown,
-): { role: "system" | "user" | "assistant"; content: string } => {
-  const message = ProviderMessage(value);
-  if (message instanceof type.errors)
-    throw new Error(`Expected a message: ${message.summary}`);
-  return message;
-};
+): { role: "system" | "user" | "assistant"; content: string } =>
+  validated(() => ProviderMessage(value), "a message");
+
+/** Read the debug data attached to an adapter error or response. */
+const debugOf = (value: unknown): Record<string, unknown> =>
+  validated(() => DebugCarrier(value), "attached debug data").debug;
 
 /** The request body text of a captured fetch call. */
 const bodyText = (init: RequestInit | undefined): string =>

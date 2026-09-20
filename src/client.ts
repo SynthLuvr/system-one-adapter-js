@@ -362,8 +362,8 @@ const buildResponse = <Q extends Questions>(init: {
     Object.fromEntries(
       Object.entries(init.answers).filter(([, answer]) => answer.type === type),
     );
-  // The runtime answers are arktype-validated and converted to SDK answer
-  // shapes, so the constraint instantiation accepts them directly.
+  // The answers are arktype-validated and converted to SDK answer shapes, so
+  // the constraint instantiation type-checks without casts.
   const response: SystemOneResponse<Questions> = {
     model: init.model,
     answers: init.answers,
@@ -379,20 +379,13 @@ const buildResponse = <Q extends Questions>(init: {
       debug: init.debug,
     }),
   };
-  // Projecting the same validated answers onto the caller's inferred question
-  // keys is a compile-time-only refinement; the assertion is checked against
-  // the constraint instantiation above and has no runtime effect.
+  // Projecting the same answers onto the caller's inferred question keys is a
+  // compile-time-only refinement with no runtime effect.
   return response as SystemOneResponse<Q>;
 };
 
 /** A callback stand-in replaced before use. */
 const noop = (): void => undefined;
-
-/** arktype type of the allowed LLM answer modes. */
-const LlmAnswerMode = type("'probabilities'|'discrete'");
-
-/** arktype type of a nonnegative corrective-retry allowance. */
-const RetryAllowance = type("number >= 0");
 
 /** Options accepted by the adapter client constructor. */
 interface SystemOneAdapterClientOptions {
@@ -441,16 +434,16 @@ class SystemOneAdapterClient {
   #closeSettled = true;
 
   constructor(options: SystemOneAdapterClientOptions) {
-    const mode = LlmAnswerMode(options.llmAnswerMode);
+    const mode = type("'probabilities'|'discrete'")(options.llmAnswerMode);
     if (mode instanceof type.errors)
       throw new Error("llm_answer_mode must be 'probabilities' or 'discrete'");
-    const allowance = RetryAllowance(options.nRetryMalformedStructure ?? 0);
-    if (allowance instanceof type.errors)
+    const retries = type("number >= 0")(options.nRetryMalformedStructure ?? 0);
+    if (retries instanceof type.errors)
       throw new Error("n_retry_malformed_structure must be >= 0");
     this.structuredOutputs = options.structuredOutputs;
     this.llmAnswerMode = mode;
     this.normalizeProbabilities = options.normalizeProbabilities ?? false;
-    this.nRetryMalformedStructure = allowance;
+    this.nRetryMalformedStructure = retries;
     this.retry = resolveRetryPolicy(options.retry);
     this.provider = options.provider;
     this.model = options.model;

@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { TypeSafeError } from "@typesafe-ai/sdk";
+import { TypeSafeError } from "@typesafe-ai/sdk";
+import { type ArkErrors, type } from "arktype";
 
 /** The provider an owned model name is built from. */
 type ProviderName = "openai" | "anthropic";
@@ -89,23 +90,35 @@ const conversation = (
     ),
   );
 
-/** Deep-copy a plain SDK response object for the attempt trace. */
-const snapshotResponse = (response: unknown): unknown => {
-  if (hasJsonSnapshot(response)) return structuredClone(response.toJSON());
-  return structuredClone(response);
-};
-
 /**
- * Detect a `toJSON` snapshot method, including inherited ones.
- *
- * This is a capability probe on the response object rather than data
- * validation, so arktype (which checks own properties) is not used here.
+ * Detect a `toJSON` snapshot method, including inherited ones. This is a
+ * capability probe on the response object rather than data validation, so
+ * arktype (which checks own properties) is not used here.
  */
 const hasJsonSnapshot = (
   value: unknown,
 ): value is { toJSON: () => unknown } => {
   if (typeof value !== "object" || value === null) return false;
   return "toJSON" in value && typeof value.toJSON === "function";
+};
+
+/** Deep-copy a plain SDK response object for the attempt trace. */
+const snapshotResponse = (response: unknown): unknown => {
+  if (hasJsonSnapshot(response)) return structuredClone(response.toJSON());
+  return structuredClone(response);
+};
+
+/** Parse a provider payload with an arktype type, or reject its shape. */
+const parsePayload = <t>(
+  parse: () => t | ArkErrors,
+  description: string,
+): t => {
+  const payload = parse();
+  if (payload instanceof type.errors)
+    throw new TypeSafeError(
+      `${description} did not match the expected shape:\n${payload.summary}`,
+    );
+  return payload;
 };
 
 /** Record a thrown error on its attempt trace. */
@@ -178,6 +191,7 @@ export {
   type ProviderName,
   type ProviderRequestOptions,
   type ProviderResult,
+  parsePayload,
   recordRequest,
   recordResponse,
   renderMessages,

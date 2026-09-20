@@ -5,9 +5,7 @@ import type { AnswerMode } from "./utils/probabilityNormalization.js";
 const MIN_CRITERIA = 2;
 
 /**
- * Runtime validation of the JSON values the SDK accepts for instructions,
- * criteria, and state.
- *
+ * JSON values the SDK accepts for instructions, criteria, and state. The
  * `JsonObject` recursion mirrors the SDK's `JsonValue` so the validated
  * inference stays structurally identical to the SDK types.
  */
@@ -23,14 +21,12 @@ const isPlainObject = (value: object): boolean =>
   !Array.isArray(value) && typeof value !== "function";
 
 /**
- * A JSON object.
- *
- * The predicate rejects arrays and functions, which also satisfy arktype's
- * `object` keyword, matching the SDK's plain-object entry values.
+ * A JSON object. The predicate rejects arrays and functions, which also
+ * satisfy arktype's `object` keyword.
  */
 const PlainObject = jsonTypes.JsonObject.narrow(isPlainObject);
 
-/** Runtime validation of one instruction or criterion value. */
+/** One instruction or criterion value. */
 const entryTypes = scope({
   PlainObject,
   JsonValue: jsonTypes.JsonValue,
@@ -38,10 +34,9 @@ const entryTypes = scope({
 }).export();
 
 /**
- * Runtime validation of noul criteria: a plain object of optional entry
- * values for the true and false outcomes.
- *
- * The predicate rejects arrays, which satisfy arktype's optional-key checks.
+ * Noul criteria: a plain object of optional entry values for the true and
+ * false outcomes. The predicate rejects arrays, which satisfy arktype's
+ * optional-key checks.
  */
 const NoulCriteria = type({
   "true?": entryTypes.EntryType.or("undefined"),
@@ -49,15 +44,14 @@ const NoulCriteria = type({
 }).narrow(isPlainObject);
 
 /**
- * Runtime validation of choice criteria: a plain object of entry values.
- *
- * The predicate rejects arrays, which satisfy arktype index signatures.
+ * Choice criteria: a plain object of entry values. The predicate rejects
+ * arrays, which satisfy arktype index signatures.
  */
 const ChoiceCriteria = type({
   "[string]": entryTypes.EntryType,
 }).narrow(isPlainObject);
 
-/** Runtime validation of the SDK question schema. */
+/** The SDK question schema. */
 const questionTypes = scope({
   EntryType: entryTypes.EntryType,
   NoulCriteria,
@@ -114,18 +108,9 @@ class OutputValidationError extends Error {
 /** Normalize one validated question to plain data with defaulted fields. */
 const normalizeQuestion = (question: Question): Question => {
   const instructions = question.instructions ?? null;
-  switch (question.type) {
-    case "noul":
-      return {
-        type: "noul",
-        instructions,
-        criteria: question.criteria ?? null,
-      };
-    case "score":
-      return { type: "score", instructions, criteria: question.criteria };
-    default:
-      return { type: "choice", instructions, criteria: question.criteria };
-  }
+  if (question.type === "noul")
+    return { type: "noul", instructions, criteria: question.criteria ?? null };
+  return { ...question, instructions };
 };
 
 /** Validate a question collection and normalize it to plain data. */
@@ -135,11 +120,11 @@ const validateQuestions = (questions: unknown): Record<string, Question> => {
     throw new InvalidQuestionsError(
       `Questions must match the SDK question schema:\n${validated.summary}`,
     );
+  if (Object.keys(validated).length === 0)
+    throw new InvalidQuestionsError("At least one question is required.");
   const normalized: Record<string, Question> = {};
   for (const [questionId, question] of Object.entries(validated))
     normalized[questionId] = structuredClone(normalizeQuestion(question));
-  if (Object.keys(normalized).length === 0)
-    throw new InvalidQuestionsError("At least one question is required.");
   for (const question of Object.values(normalized))
     if (
       question.type !== "noul" &&
@@ -159,24 +144,20 @@ const serializeInstructionValue = (value: unknown): string => {
   return JSON.stringify(value);
 };
 
+/** The criteria of a score or choice question, keyed by answer label. */
+const criteriaByLabel = (question: Question): [string, EntryType][] => {
+  if (question.type === "score")
+    return question.criteria.map((criterion, score): [string, EntryType] => [
+      String(score),
+      criterion,
+    ]);
+  if (question.type === "choice") return Object.entries(question.criteria);
+  return [];
+};
+
 /** The ordered answer labels of a score or choice question. */
 const answerLabels = (question: Question): string[] =>
-  question.type === "score"
-    ? question.criteria.map((_, score) => String(score))
-    : question.type === "choice"
-      ? Object.keys(question.criteria)
-      : [];
-
-/** The criteria of a score or choice question, keyed by answer label. */
-const criteriaByLabel = (question: Question): [string, EntryType][] =>
-  question.type === "score"
-    ? question.criteria.map((criterion, score): [string, EntryType] => [
-        String(score),
-        criterion,
-      ])
-    : question.type === "choice"
-      ? Object.entries(question.criteria)
-      : [];
+  criteriaByLabel(question).map(([label]) => label);
 
 /** The per-question description used on probability-map definitions. */
 const questionDescription = (question: Question, mode: AnswerMode): string => {
@@ -363,11 +344,8 @@ const buildSchema = (spec: OutputSpec): JsonSchema => {
   };
 };
 
-/** arktype type of one probability: a finite number in [0, 1]. */
+/** A probability: a number in [0, 1]. */
 const Probability = type("number").atLeast(0).atMost(1);
-
-/** arktype type of a discrete boolean answer. */
-const BooleanAnswer = type("boolean");
 
 /** Require exactly the given keys on a probability map. */
 const exactKeySet =
@@ -375,8 +353,8 @@ const exactKeySet =
   (value: Record<string, number>, ctx: Traversal): boolean => {
     const keys = Object.keys(value);
     if (
-      labels.every((label) => keys.includes(label)) &&
-      keys.every((key) => labels.includes(key))
+      keys.length === labels.length &&
+      labels.every((label) => keys.includes(label))
     )
       return true;
     return ctx.mustBe(
@@ -388,7 +366,7 @@ const exactKeySet =
 const answerType = (answerSpec: AnswerSpec): Type<ValidatedAnswer> => {
   switch (answerSpec.kind) {
     case "boolean":
-      return BooleanAnswer;
+      return type("boolean");
     case "probability":
       return Probability;
     case "integer":
@@ -402,11 +380,10 @@ const answerType = (answerSpec: AnswerSpec): Type<ValidatedAnswer> => {
   }
 };
 
-/** arktype type of the answers record inside a model payload. */
-const AnswersRecord = type({ "[string]": "unknown" });
-
-/** arktype type of a parsed model payload: exactly an `answers` object. */
-const ModelPayload = type({ answers: AnswersRecord }).onUndeclaredKey("reject");
+/** A parsed model payload: exactly an `answers` object. */
+const ModelPayload = type({
+  answers: { "[string]": "unknown" },
+}).onUndeclaredKey("reject");
 
 /** Render one arktype error as a validation issue string. */
 const issueFor = (prefix: string, error: ArkError): string => {

@@ -17,6 +17,7 @@ import {
   type Provider,
   type ProviderRequestOptions,
   type ProviderResult,
+  parsePayload,
   recordRequest,
   recordResponse,
   systemPrompt,
@@ -45,9 +46,6 @@ const translateError = providerErrorTranslator({
   apiError: APIError,
 });
 
-/** arktype type of a positive output-token limit. */
-const MaxTokens = type("number > 0");
-
 /** Runtime validation of the Messages API payloads this provider reads. */
 const payloadTypes = scope({
   ContentBlock: {
@@ -67,11 +65,10 @@ const payloadTypes = scope({
 
 /** Parse one Messages API payload, rejecting truncated output. */
 const anthropicResult = (response: unknown): ProviderResult => {
-  const payload = payloadTypes.MessagesPayload(response);
-  if (payload instanceof type.errors)
-    throw new TypeSafeError(
-      `Anthropic response did not match the expected shape:\n${payload.summary}`,
-    );
+  const payload = parsePayload(
+    () => payloadTypes.MessagesPayload(response),
+    "Anthropic response",
+  );
   recordResponse(response, { finishReason: payload.stop_reason });
   if (payload.stop_reason === "max_tokens")
     throw new TypeSafeError(
@@ -116,7 +113,9 @@ class AnthropicProvider implements Provider {
   readonly client: Anthropic;
 
   constructor(modelName: string, options: AnthropicProviderOptions = {}) {
-    const maxTokens = MaxTokens(options.maxTokens ?? DEFAULT_MAX_TOKENS);
+    const maxTokens = type("number > 0")(
+      options.maxTokens ?? DEFAULT_MAX_TOKENS,
+    );
     if (maxTokens instanceof type.errors)
       throw new Error("max_tokens must be > 0");
     this.modelName = modelName;
