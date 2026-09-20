@@ -146,3 +146,14 @@ pnpm lint     # format + lint everything
 ```
 
 See [AGENTS.md](AGENTS.md) for the toolchain and coding conventions.
+
+## Testing
+
+The suite is entirely integration tests: every evaluation runs the real
+client, provider, and provider SDK, and [MSW](https://mswjs.io)
+intercepts the outgoing HTTP traffic. No test mocks, spies on, or stubs
+any function — provider behavior is exercised through real requests and
+responses, so request construction, response parsing, error translation,
+retries, and the debug traces are verified end to end. Unhandled
+requests are rejected, so a test that triggers unintended network
+traffic fails.
