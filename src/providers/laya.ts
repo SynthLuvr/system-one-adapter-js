@@ -28,8 +28,6 @@ type LayaModel = (typeof LAYA_MODELS)[number];
 interface LayaOptions {
   /** Python interpreter hosting the laya package; default `python3`. */
   python?: string;
-  /** Runs the one-shot python process; injectable for offline tests. */
-  runPython?: PythonRunner;
 }
 
 /** Result of one python one-shot invocation. */
@@ -39,7 +37,10 @@ interface PythonResult {
   code: number;
 }
 
-/** Runs a python script with stdin, resolving when the process exits. */
+/**
+ * Runs a python script with stdin, resolving even when the process cannot
+ * spawn (exit code -1) — failures surface through the validated result.
+ */
 type PythonRunner = (
   python: string,
   script: string,
@@ -164,7 +165,6 @@ class LayaProvider implements ClosableProvider {
   readonly modelName: string;
   readonly #model: LayaModel;
   readonly #python: string;
-  readonly #runner: PythonRunner;
 
   constructor(model: LayaModel, options: LayaOptions = {}) {
     if (!(LAYA_MODELS as readonly string[]).includes(model))
@@ -172,7 +172,6 @@ class LayaProvider implements ClosableProvider {
     this.modelName = `laya/${model}`;
     this.#model = model;
     this.#python = options.python ?? process.env.LAYA_PYTHON ?? "python3";
-    this.#runner = options.runPython ?? defaultRunner;
   }
 
   /** No-op: each request spawns a fresh short-lived process. */
@@ -195,7 +194,7 @@ class LayaProvider implements ClosableProvider {
     const questions: Record<string, LayaQuestion> = {};
     for (const [questionId, question] of Object.entries(typed.questions))
       questions[questionId] = toLayaQuestion(question);
-    const result = await this.#runner(
+    const result = await defaultRunner(
       this.#python,
       LAYA_SCRIPT,
       JSON.stringify({

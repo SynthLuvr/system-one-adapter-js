@@ -80,6 +80,9 @@ const questionTypes = scope({
 /** A JSON value used for instructions, criteria, and state. */
 type EntryType = typeof questionTypes.EntryType.infer;
 
+/** A validated noul question. */
+type NoulQuestion = typeof questionTypes.NoulQuestion.infer;
+
 /** A validated question in provider-neutral form. */
 type Question = typeof questionTypes.Question.infer;
 
@@ -149,8 +152,7 @@ const serializeInstructionValue = (value: unknown): string => {
  * descriptions render them so typed-question providers mirror the prompt an
  * LLM provider sees; empty when the question carries no criteria.
  */
-const noulCriteriaNote = (question: Question): string => {
-  if (question.type !== "noul") return "";
+const noulCriteriaNote = (question: NoulQuestion): string => {
   const criteria = question.criteria ?? null;
   if (criteria === null) return "";
   const trueCriteria = serializeInstructionValue(criteria.true ?? null);
@@ -442,6 +444,7 @@ export {
   type EntryType,
   InvalidQuestionsError,
   type JsonSchema,
+  type NoulQuestion,
   noulCriteriaNote,
   type OutputSpec,
   OutputValidationError,

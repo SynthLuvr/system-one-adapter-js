@@ -20,8 +20,10 @@ interface ProviderResult {
   outputTokens: number;
 }
 
-/** The typed-question view of a request, for providers that answer the
- * questions directly instead of prompting a model. */
+/**
+ * The typed-question view of a request, for providers that answer the
+ * questions directly instead of prompting a model.
+ */
 interface TypedQuestions {
   /** The state the questions are evaluated against. */
   state: unknown;

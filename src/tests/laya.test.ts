@@ -6,11 +6,12 @@ import { choice, noul, score } from "@typesafe-ai/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SystemOneAdapterClient } from "../client.js";
 import {
+  defaultRunner,
   LAYA_MODELS,
+  LAYA_SCRIPT,
   type LayaModel,
   LayaProvider,
-} from "../providers/index.js";
-import { defaultRunner, LAYA_SCRIPT } from "../providers/laya.js";
+} from "../providers/laya.js";
 
 /**
  * Every evaluation in this file runs the real laya engine: the provider's
@@ -135,17 +136,19 @@ const QUESTIONS = {
   ]),
 };
 
+/** Assert a probability-like value lies in [0, 1]. */
+const expectUnitInterval = (value: number | undefined): void => {
+  expect(value).toBeGreaterThanOrEqual(0);
+  expect(value).toBeLessThanOrEqual(1);
+};
+
 /** Assert every probability lies in [0, 1] and they sum to ~1. */
 const expectDistribution = (
   probabilities: Record<string, number> | undefined,
 ): void => {
-  expect(probabilities).toBeDefined();
   const values = Object.values(probabilities ?? {});
   expect(values).not.toHaveLength(0);
-  for (const value of values) {
-    expect(value).toBeGreaterThanOrEqual(0);
-    expect(value).toBeLessThanOrEqual(1);
-  }
+  for (const value of values) expectUnitInterval(value);
   const sum = values.reduce((total, value) => total + value, 0);
   expect(Math.abs(sum - 1)).toBeLessThan(0.01);
 };
@@ -230,12 +233,10 @@ describe("LayaProvider against the real laya engine", () => {
         : best,
     );
     expect(verdict?.choice).toBe(argmax);
-    expect(verdict?.confidence).toBeGreaterThanOrEqual(0);
-    expect(verdict?.confidence).toBeLessThanOrEqual(1);
+    expectUnitInterval(verdict?.confidence);
 
     const isSafe = response.nouls.is_safe;
-    expect(isSafe?.noul).toBeGreaterThanOrEqual(0);
-    expect(isSafe?.noul).toBeLessThanOrEqual(1);
+    expectUnitInterval(isSafe?.noul);
 
     const rating = response.scores.rating;
     expect(rating?.legend).toEqual({
@@ -256,8 +257,7 @@ describe("LayaProvider against the real laya engine", () => {
       0,
     );
     expect(Math.abs((rating?.score ?? -1) - expected)).toBeLessThan(0.01);
-    expect(rating?.confidence).toBeGreaterThanOrEqual(0);
-    expect(rating?.confidence).toBeLessThanOrEqual(1);
+    expectUnitInterval(rating?.confidence);
   });
 
   it("maps discrete answers: labels, booleans, rounded scores", {
@@ -311,8 +311,7 @@ describe("LayaProvider against the real laya engine", () => {
     await adapter.close();
 
     expect(response.model).toBe("laya/multilingual");
-    expect(response.nouls.urgent?.noul).toBeGreaterThanOrEqual(0);
-    expect(response.nouls.urgent?.noul).toBeLessThanOrEqual(1);
+    expectUnitInterval(response.nouls.urgent?.noul);
   });
 
   it("runs the built-in provider through the LAYA_PYTHON interpreter", {
@@ -327,8 +326,7 @@ describe("LayaProvider against the real laya engine", () => {
       await adapter.close();
 
       expect(response.model).toBe("laya/router");
-      expect(response.nouls.positive?.noul).toBeGreaterThanOrEqual(0);
-      expect(response.nouls.positive?.noul).toBeLessThanOrEqual(1);
+      expectUnitInterval(response.nouls.positive?.noul);
     });
   });
 });
