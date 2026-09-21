@@ -134,6 +134,9 @@ importers:
       ts-canon:
         specifier: ^0.1.5
         version: 0.1.8
+      type-a-bin:
+        specifier: ^0.1.7
+        version: 0.1.7(@vitest/coverage-v8@5.0.1)(ast-v8-to-istanbul@1.0.6)(vitest@5.0.1)
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
@@ -1447,6 +1450,21 @@ packages:
     engines: {node: '>=18.0.0'}
     hasBin: true
 
+  type-a-bin@0.1.7:
+    resolution: {integrity: sha512-UlqgPMG6z1xJsc/ddsvJiq7Fdc4YtdYHK+JayUMKc+f13oZ3TtCgQ20zLwfxl79DqTsh/KvG+0iZbBZInNC63Q==}
+    engines: {node: '==26'}
+    peerDependencies:
+      '@vitest/coverage-v8': '>= 2'
+      ast-v8-to-istanbul: '>= 1'
+      vitest: '>= 2'
+    peerDependenciesMeta:
+      '@vitest/coverage-v8':
+        optional: true
+      ast-v8-to-istanbul:
+        optional: true
+      vitest:
+        optional: true
+
   type-fest@5.10.0:
     resolution: {integrity: sha512-NoSdpq/WEiAg5sjmBkmV/hfxv6HJH4NqPNrqjtSO5CwRmpsDfaf4begxW34KdJykH/l1yHtwBWQkCRdoXO8mPA==}
     engines: {node: '>=20'}
@@ -2517,6 +2535,12 @@ snapshots:
       esbuild: 0.28.2
     optionalDependencies:
       fsevents: 2.3.3
+
+  type-a-bin@0.1.7(@vitest/coverage-v8@5.0.1)(ast-v8-to-istanbul@1.0.6)(vitest@5.0.1):
+    optionalDependencies:
+      '@vitest/coverage-v8': 5.0.1(vitest@5.0.1)
+      ast-v8-to-istanbul: 1.0.6
+      vitest: 5.0.1(@types/node@26.6.2)(@vitest/coverage-v8@5.0.1)(msw@2.15.0(@types/node@26.6.2)(typescript@7.0.2))(vite@8.3.0(@types/node@26.6.2)(esbuild@0.28.2)(tsx@4.23.13))
 
   type-fest@5.10.0:
     dependencies:

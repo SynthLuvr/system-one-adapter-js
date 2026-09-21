@@ -3,7 +3,7 @@ import { TypeSafeError } from "@typesafe-ai/sdk";
 import { type ArkErrors, type } from "arktype";
 
 /** The provider an owned model name is built from. */
-type ProviderName = "openai" | "anthropic";
+type ProviderName = "openai" | "anthropic" | "claude_code";
 
 /** One chat message in provider-neutral form. */
 interface Message {
