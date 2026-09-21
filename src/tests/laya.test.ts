@@ -1,126 +1,96 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { choice, noul, score } from "@typesafe-ai/sdk";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { SystemOneAdapterClient } from "../client.js";
 import {
   LAYA_MODELS,
   type LayaModel,
   LayaProvider,
 } from "../providers/index.js";
-import {
-  defaultRunner,
-  LAYA_SCRIPT,
-  type PythonResult,
-} from "../providers/laya.js";
-
-/** One question of the stdin payload handed to the python bridge. */
-type PayloadQuestion =
-  | { type: "choice"; instructions: string; criteria: Record<string, string> }
-  | { type: "score"; instructions: string; criteria: string[] }
-  | { type: "noul"; instructions: string };
-
-/** The stdin payload handed to the python bridge. */
-type Payload = {
-  model: string;
-  mode: string;
-  state: unknown;
-  questions: Record<string, PayloadQuestion>;
-};
-
-/** A laya-native answer, as the laya engine itself would return it. */
-type StubLayaAnswer =
-  | {
-      type: "choice";
-      choice: string;
-      confidence: number;
-      probabilities: Record<string, number>;
-    }
-  | {
-      type: "score";
-      score: number;
-      confidence: number;
-      probabilities: Record<string, number>;
-    }
-  | { type: "noul"; noul: number };
-
-/** The laya-native answer the stub engine returns for one question. */
-const stubLayaAnswer = (question: PayloadQuestion): StubLayaAnswer => {
-  if (question.type === "choice") {
-    const labels = Object.keys(question.criteria);
-    return {
-      type: "choice",
-      choice: labels[0],
-      confidence: 0.6,
-      probabilities: Object.fromEntries(
-        labels.map((label, index) => [
-          label,
-          index === 0 ? 0.6 : 0.4 / Math.max(labels.length - 1, 1),
-        ]),
-      ),
-    };
-  }
-  if (question.type === "score")
-    return {
-      type: "score",
-      score: 1.6,
-      confidence: 0.5,
-      probabilities: Object.fromEntries(
-        question.criteria.map((_, index) => [
-          String(index),
-          1 / question.criteria.length,
-        ]),
-      ),
-    };
-  return { type: "noul", noul: 0.83 };
-};
-
-/** Map a laya answer the way the embedded script maps results. */
-const adaptedAnswer = (laya: StubLayaAnswer, mode: string): unknown => {
-  if (laya.type === "noul")
-    return mode === "discrete" ? laya.noul >= 0.5 : laya.noul;
-  if (mode === "discrete")
-    return laya.type === "score" ? Math.round(laya.score) : laya.choice;
-  return laya.probabilities;
-};
+import { defaultRunner, LAYA_SCRIPT } from "../providers/laya.js";
 
 /**
- * Fake runner standing in for python + laya: it answers the received
- * questions the way the embedded script maps laya results.
+ * Every evaluation in this file runs the real laya engine: the provider's
+ * embedded python script is spawned for real and answers with the actual
+ * `convaiinnovations/laya` checkpoints (downloaded from the Hugging Face
+ * hub on first use). Nothing is stubbed, faked, or intercepted.
  */
-const fakeRunner = async (
-  _python: string,
-  script: string,
-  stdin: string,
-): Promise<PythonResult> => {
-  expect(script).toBe(LAYA_SCRIPT);
-  const payload = JSON.parse(stdin) as Payload;
-  const answers: Record<string, unknown> = {};
-  for (const [questionId, question] of Object.entries(payload.questions))
-    answers[questionId] = adaptedAnswer(stubLayaAnswer(question), payload.mode);
-  return { stdout: JSON.stringify({ answers }), stderr: "", code: 0 };
+
+/** Per-test ceiling sized for a cold Hugging Face checkpoint download. */
+const MODEL_TIMEOUT = 600_000;
+
+/** The repo-local venv the laya package is installed into for tests. */
+const VENV_PYTHON = join(
+  process.cwd(),
+  "node_modules",
+  ".cache",
+  "laya-venv",
+  "bin",
+  "python",
+);
+
+/** Resolve `true` when the given path exists. */
+const fileExists = (path: string): Promise<boolean> =>
+  stat(path).then(
+    () => true,
+    () => false,
+  );
+
+/** Resolve whether the given interpreter has the laya package importable. */
+const canImportLaya = (python: string): Promise<boolean> =>
+  new Promise((resolve) => {
+    const child = spawn(python, [
+      "-c",
+      "import importlib.util, sys; " +
+        "sys.exit(0 if importlib.util.find_spec('laya') is not None else 1)",
+    ]);
+    child.on("error", () => resolve(false));
+    child.on("close", (code) => resolve(code === 0));
+  });
+
+/**
+ * Interpreter hosting the real laya package: an explicit `LAYA_PYTHON`
+ * wins, then the repo-local venv under `node_modules/.cache` (invisible
+ * to git and the repo tooling), then any `python3` on PATH.
+ */
+const resolveLayaPython = async (): Promise<string | undefined> => {
+  if (process.env.LAYA_PYTHON !== undefined) return process.env.LAYA_PYTHON;
+  if ((await fileExists(VENV_PYTHON)) && (await canImportLaya(VENV_PYTHON)))
+    return VENV_PYTHON;
+  if (await canImportLaya("python3")) return "python3";
+  return undefined;
 };
 
-/** A runner whose python process fails with the given stderr. */
-const failingRunner = async (): Promise<PythonResult> => ({
-  stdout: "",
-  stderr:
-    "Traceback (most recent call last):\nModuleNotFoundError: No module named 'laya'",
-  code: 1,
-});
+const layaPython = await resolveLayaPython();
+if (layaPython === undefined)
+  console.warn(
+    "Skipping the real-laya tests: no interpreter with the laya package " +
+      "was found. Install one with " +
+      "`uv venv node_modules/.cache/laya-venv && " +
+      "uv pip install --python node_modules/.cache/laya-venv laya " +
+      "--torch-backend=cpu` (or `pip install laya`), or point LAYA_PYTHON " +
+      "at an interpreter that has it.",
+  );
 
-/** A client evaluating through the given runner-backed provider. */
+/** The resolved interpreter; model tests only run when this is defined. */
+const python = (): string => {
+  if (layaPython === undefined) throw new Error("laya python not resolved");
+  return layaPython;
+};
+
+/** A client evaluating through the real laya engine at the given model. */
 const client = (
-  runPython = fakeRunner,
+  model: LayaModel,
   llmAnswerMode: "probabilities" | "discrete" = "probabilities",
 ): SystemOneAdapterClient =>
   new SystemOneAdapterClient({
     structuredOutputs: true,
     llmAnswerMode,
     normalizeProbabilities: true,
-    model: new LayaProvider("router", { runPython }),
+    model: new LayaProvider(model, { python: python() }),
   });
 
 const QUESTIONS = {
@@ -140,169 +110,30 @@ const QUESTIONS = {
   ]),
 };
 
+/** Assert every probability lies in [0, 1] and they sum to ~1. */
+const expectDistribution = (
+  probabilities: Record<string, number> | undefined,
+): void => {
+  expect(probabilities).toBeDefined();
+  const values = Object.values(probabilities ?? {});
+  expect(values).not.toHaveLength(0);
+  for (const value of values) {
+    expect(value).toBeGreaterThanOrEqual(0);
+    expect(value).toBeLessThanOrEqual(1);
+  }
+  const sum = values.reduce((total, value) => total + value, 0);
+  expect(Math.abs(sum - 1)).toBeLessThan(0.01);
+};
+
 describe("LayaProvider", () => {
-  it("evaluates typed questions through the python bridge", async () => {
-    const received: Payload[] = [];
-    const spyRunner = async (
-      python: string,
-      script: string,
-      stdin: string,
-    ): Promise<PythonResult> => {
-      received.push(JSON.parse(stdin) as Payload);
-      return fakeRunner(python, script, stdin);
-    };
-    const adapter = client(spyRunner);
-    const response = await adapter.systemOne({
-      state: { user_message: "hi", assistant_1: "a", assistant_2: "b" },
-      questions: QUESTIONS,
-    });
-    await adapter.close();
-
-    expect(received).toHaveLength(1);
-    expect(received[0]?.model).toBe("router");
-    expect(received[0]?.mode).toBe("probabilities");
-    expect(received[0]?.state).toEqual({
-      user_message: "hi",
-      assistant_1: "a",
-      assistant_2: "b",
-    });
-    expect(received[0]?.questions.verdict).toEqual({
-      type: "choice",
-      instructions: "Which response is better?",
-      criteria: {
-        A: "Assistant 1 is better",
-        B: "Assistant 2 is better",
-        tie: "Equally good",
-      },
-    });
-    expect(received[0]?.questions.is_safe).toEqual({
-      type: "noul",
-      instructions:
-        "Is the exchange safe?\nTrue criteria: No harmful content\n" +
-        "False criteria: Contains harmful content",
-    });
-    expect(received[0]?.questions.rating).toEqual({
-      type: "score",
-      instructions: "How helpful is the response?",
-      criteria: ["Unhelpful", "Somewhat helpful", "Very helpful"],
-    });
-
-    expect(response.model).toBe("laya/router");
-    expect(response.usage.input_tokens_total).toBe(0);
-    expect(response.usage.output_tokens_total).toBe(0);
-    expect(response.nouls.is_safe?.noul).toBeCloseTo(0.83, 5);
-    expect(response.choices.verdict?.choice).toBe("A");
-    expect(response.choices.verdict?.probabilities?.A).toBeCloseTo(0.6, 5);
-  });
-
-  it("answers score questions with laya's native score support", async () => {
-    const adapter = client();
-    const response = await adapter.systemOne({
-      state: { body: "A thoughtful and complete answer." },
-      questions: { rating: QUESTIONS.rating },
-    });
-    await adapter.close();
-    const answer = response.scores.rating;
-    expect(answer?.score).toBeCloseTo(1, 5);
-    expect(answer?.probabilities).toEqual({ 0: 1 / 3, 1: 1 / 3, 2: 1 / 3 });
-    expect(answer?.legend).toEqual({
-      0: "Unhelpful",
-      1: "Somewhat helpful",
-      2: "Very helpful",
-    });
-  });
-
-  it("maps discrete answers: labels, boolean nouls, rounded scores", async () => {
-    const adapter = client(fakeRunner, "discrete");
-    const response = await adapter.systemOne({
-      state: { body: "text" },
-      questions: QUESTIONS,
-    });
-    await adapter.close();
-    expect(response.choices.verdict?.choice).toBe("A");
-    expect(response.nouls.is_safe?.noul).toBe(1);
-    // The stub's 1.6 expected score rounds to level 2.
-    expect(response.scores.rating?.score).toBe(2);
-  });
-
   it("rejects unknown laya models", () => {
     expect(() => new LayaProvider("flash" as LayaModel)).toThrow(
       `laya model must be one of ${LAYA_MODELS.join(", ")}`,
     );
   });
 
-  it("honors the LAYA_PYTHON environment variable", async () => {
-    const previous = process.env.LAYA_PYTHON;
-    process.env.LAYA_PYTHON = "laya-test-python";
-    try {
-      let seenPython = "";
-      const recorder = async (
-        python: string,
-        script: string,
-        stdin: string,
-      ): Promise<PythonResult> => {
-        seenPython = python;
-        return fakeRunner(python, script, stdin);
-      };
-      const adapter = new SystemOneAdapterClient({
-        structuredOutputs: true,
-        llmAnswerMode: "probabilities",
-        model: new LayaProvider("english", { runPython: recorder }),
-      });
-      await adapter.systemOne({
-        state: { body: "x" },
-        questions: { positive: noul("Good?") },
-      });
-      await adapter.close();
-      expect(seenPython).toBe("laya-test-python");
-    } finally {
-      if (previous === undefined) delete process.env.LAYA_PYTHON;
-      else process.env.LAYA_PYTHON = previous;
-    }
-  });
-
-  it("surfaces python failures as provider errors", async () => {
-    const adapter = client(failingRunner);
-    await expect(
-      adapter.systemOne({ state: { body: "x" }, questions: QUESTIONS }),
-    ).rejects.toThrow(/laya python process exited 1.*ModuleNotFoundError/u);
-    await adapter.close();
-  });
-
-  it("surfaces a missing laya install through the built-in provider", async () => {
-    const adapter = new SystemOneAdapterClient({
-      structuredOutputs: true,
-      llmAnswerMode: "probabilities",
-      provider: "laya",
-      model: "router",
-    });
-    await expect(
-      adapter.systemOne({ state: { body: "x" }, questions: QUESTIONS }),
-    ).rejects.toThrow(/laya python process exited/u);
-    await adapter.close();
-  });
-
-  it("rejects python output that is not JSON", async () => {
-    const provider = new LayaProvider("router", {
-      runPython: async () => ({ stdout: "not json", stderr: "", code: 0 }),
-    });
-    await expect(
-      provider.request([{ role: "user", content: "unused" }], {
-        schema: {},
-        structured: true,
-        typed: {
-          state: { body: "x" },
-          questions: {
-            positive: { type: "noul", instructions: null, criteria: null },
-          },
-          answerMode: "probabilities",
-        },
-      }),
-    ).rejects.toThrow(/invalid JSON/u);
-  });
-
   it("rejects requests without typed questions", async () => {
-    const provider = new LayaProvider("router", { runPython: fakeRunner });
+    const provider = new LayaProvider("router");
     await expect(
       provider.request([{ role: "user", content: "unused" }], {
         schema: {},
@@ -326,138 +157,227 @@ describe("LayaProvider", () => {
     expect(result.code).toBe(-1);
     expect(result.stderr).toContain("adapter-no-such-python");
   });
+
+  it("routes requests through the LAYA_PYTHON interpreter", async () => {
+    const previous = process.env.LAYA_PYTHON;
+    process.env.LAYA_PYTHON = "adapter-no-such-laya-python";
+    try {
+      const adapter = new SystemOneAdapterClient({
+        structuredOutputs: true,
+        llmAnswerMode: "probabilities",
+        provider: "laya",
+        model: "router",
+      });
+      await expect(
+        adapter.systemOne({
+          state: { body: "x" },
+          questions: { positive: noul("Good?") },
+        }),
+      ).rejects.toThrow(/adapter-no-such-laya-python/u);
+      await adapter.close();
+    } finally {
+      if (previous === undefined) delete process.env.LAYA_PYTHON;
+      else process.env.LAYA_PYTHON = previous;
+    }
+  });
 });
 
-/** The stub `laya` module the embedded script is exercised against. */
-const LAYA_STUB = `
-class _Agent:
-    def __init__(self, noul_value):
-        self.noul_value = noul_value
+describe.skipIf(layaPython === undefined)(
+  "LayaProvider against the real laya engine",
+  () => {
+    it("evaluates typed questions with calibrated probabilities", {
+      timeout: MODEL_TIMEOUT,
+    }, async () => {
+      const adapter = client("router");
+      const response = await adapter.systemOne({
+        state: { user_message: "hi", assistant_1: "a", assistant_2: "b" },
+        questions: QUESTIONS,
+      });
+      await adapter.close();
 
-    def predict(self, state, questions):
-        answers = {}
-        for qid, q in questions.items():
-            if q["type"] == "choice":
-                labels = list(q["criteria"].keys())
-                probs = {}
-                for i, label in enumerate(labels):
-                    probs[label] = 0.6 if i == 0 else 0.4 / max(len(labels) - 1, 1)
-                answers[qid] = {"type": "choice", "choice": labels[0],
-                                "confidence": 0.6, "probabilities": probs}
-            elif q["type"] == "score":
-                k = len(q["criteria"])
-                probs = {str(i): 1.0 / k for i in range(k)}
-                answers[qid] = {"type": "score", "score": 1.6,
-                                "probabilities": probs, "confidence": 0.5}
-            else:
-                answers[qid] = {"type": "noul", "noul": self.noul_value}
-        return {"answers": answers}
+      // A local encoder has no token metering, but latency is measured.
+      expect(response.model).toBe("laya/router");
+      expect(response.usage.input_tokens_total).toBe(0);
+      expect(response.usage.output_tokens_total).toBe(0);
+      expect(response.usage.latency).toBeGreaterThan(0);
 
-class Router:
-    def __init__(self, **kwargs):
-        pass
+      const verdict = response.choices.verdict;
+      expect(["A", "B", "tie"]).toContain(verdict?.choice);
+      expect(Object.keys(verdict?.probabilities ?? {}).sort()).toEqual([
+        "A",
+        "B",
+        "tie",
+      ]);
+      expectDistribution(verdict?.probabilities);
+      // The discrete choice is the argmax of the returned distribution.
+      const argmax = (["A", "B", "tie"] as const).reduce((best, label) =>
+        (verdict?.probabilities?.[label] ?? 0) >
+        (verdict?.probabilities?.[best] ?? 0)
+          ? label
+          : best,
+      );
+      expect(verdict?.choice).toBe(argmax);
+      expect(verdict?.confidence).toBeGreaterThanOrEqual(0);
+      expect(verdict?.confidence).toBeLessThanOrEqual(1);
 
-    def predict(self, state, questions):
-        return _Agent(0.83).predict(state, questions)
+      const isSafe = response.nouls.is_safe;
+      expect(isSafe?.noul).toBeGreaterThanOrEqual(0);
+      expect(isSafe?.noul).toBeLessThanOrEqual(1);
 
-def load(repo, subfolder=None):
-    return _Agent(0.42 if subfolder == "multilingual" else 0.83)
-`;
+      const rating = response.scores.rating;
+      expect(rating?.legend).toEqual({
+        0: "Unhelpful",
+        1: "Somewhat helpful",
+        2: "Very helpful",
+      });
+      expect(Object.keys(rating?.probabilities ?? {}).sort()).toEqual([
+        "0",
+        "1",
+        "2",
+      ]);
+      expectDistribution(rating?.probabilities);
+      // The reported score is the expected value over that distribution.
+      const expected = (["0", "1", "2"] as const).reduce(
+        (total, level) =>
+          total + Number(level) * (rating?.probabilities?.[level] ?? 0),
+        0,
+      );
+      expect(Math.abs((rating?.score ?? -1) - expected)).toBeLessThan(0.01);
+      expect(rating?.confidence).toBeGreaterThanOrEqual(0);
+      expect(rating?.confidence).toBeLessThanOrEqual(1);
+    });
 
-describe("embedded python script", () => {
-  let pythonAvailable = false;
+    it("maps discrete answers: labels, booleans, rounded scores", {
+      timeout: MODEL_TIMEOUT,
+    }, async () => {
+      const adapter = client("english", "discrete");
+      const response = await adapter.systemOne({
+        state: { body: "A thoughtful and complete answer." },
+        questions: QUESTIONS,
+      });
+      await adapter.close();
+
+      const verdict = response.choices.verdict;
+      expect(["A", "B", "tie"]).toContain(verdict?.choice);
+      // A discrete answer carries all its probability on the chosen label.
+      for (const label of ["A", "B", "tie"] as const)
+        expect(verdict?.probabilities?.[label]).toBe(
+          label === verdict?.choice ? 1 : 0,
+        );
+
+      expect([0, 1]).toContain(response.nouls.is_safe?.noul);
+
+      const rating = response.scores.rating;
+      expect(Number.isInteger(rating?.score)).toBe(true);
+      expect(rating?.score).toBeGreaterThanOrEqual(0);
+      expect(rating?.score).toBeLessThanOrEqual(2);
+      expect(Object.keys(rating?.probabilities ?? {}).sort()).toEqual([
+        "0",
+        "1",
+        "2",
+      ]);
+      const level = String(rating?.score);
+      expect(rating?.probabilities?.[0]).toBe(level === "0" ? 1 : 0);
+      expect(rating?.probabilities?.[1]).toBe(level === "1" ? 1 : 0);
+      expect(rating?.probabilities?.[2]).toBe(level === "2" ? 1 : 0);
+      expect(rating?.legend).toEqual({
+        0: "Unhelpful",
+        1: "Somewhat helpful",
+        2: "Very helpful",
+      });
+    });
+
+    it("loads the multilingual checkpoint with its subfolder", {
+      timeout: MODEL_TIMEOUT,
+    }, async () => {
+      const adapter = client("multilingual");
+      const response = await adapter.systemOne({
+        state: { body: "Mein Konto wurde zweimal belastet" },
+        questions: { urgent: noul("Urgent?") },
+      });
+      await adapter.close();
+
+      expect(response.model).toBe("laya/multilingual");
+      expect(response.nouls.urgent?.noul).toBeGreaterThanOrEqual(0);
+      expect(response.nouls.urgent?.noul).toBeLessThanOrEqual(1);
+    });
+
+    it("runs the built-in provider through the LAYA_PYTHON interpreter", {
+      timeout: MODEL_TIMEOUT,
+    }, async () => {
+      const previous = process.env.LAYA_PYTHON;
+      process.env.LAYA_PYTHON = python();
+      try {
+        const adapter = new SystemOneAdapterClient({
+          structuredOutputs: true,
+          llmAnswerMode: "probabilities",
+          provider: "laya",
+          model: "router",
+        });
+        const response = await adapter.systemOne({
+          state: { body: "A thoughtful and complete answer." },
+          questions: { positive: noul("The answer is helpful.") },
+        });
+        await adapter.close();
+
+        expect(response.model).toBe("laya/router");
+        expect(response.nouls.positive?.noul).toBeGreaterThanOrEqual(0);
+        expect(response.nouls.positive?.noul).toBeLessThanOrEqual(1);
+      } finally {
+        if (previous === undefined) delete process.env.LAYA_PYTHON;
+        else process.env.LAYA_PYTHON = previous;
+      }
+    });
+  },
+);
+
+describe("a missing laya install", () => {
+  // A freshly created venv has no packages, so its interpreter always
+  // reproduces the real ModuleNotFoundError a machine without laya sees.
+  let bareVenvDir: string | undefined;
+  let barePython: string | undefined;
+
+  const discard = async (): Promise<void> => {
+    if (bareVenvDir === undefined) return;
+    await rm(bareVenvDir, { recursive: true, force: true });
+    bareVenvDir = undefined;
+    barePython = undefined;
+  };
 
   beforeAll(async () => {
-    pythonAvailable = await new Promise((resolve) => {
-      const child = spawn("python3", ["-c", "pass"]);
+    const dir = await mkdtemp(join(tmpdir(), "adapter-laya-bare-"));
+    bareVenvDir = dir;
+    const created = await new Promise<boolean>((resolve) => {
+      const child = spawn("python3", ["-m", "venv", "--without-pip", dir]);
       child.on("error", () => resolve(false));
-      child.on("close", () => resolve(true));
+      child.on("close", (code) => resolve(code === 0));
     });
+    if (created) barePython = join(bareVenvDir, "bin", "python");
+    else await discard();
+  }, 60_000);
+
+  afterAll(async () => {
+    await discard();
   });
 
-  /** Run the real script against the stubbed laya package. */
-  const runScript = async (
-    stdin: string,
-  ): Promise<{ code: number; stdout: string; stderr: string }> => {
-    const dir = await mkdtemp(join(tmpdir(), "adapter-laya-"));
-    const previousPath = process.env.PYTHONPATH;
+  it("surfaces the python failure through the built-in provider", async (context) => {
+    if (barePython === undefined) return context.skip();
+    const previous = process.env.LAYA_PYTHON;
+    process.env.LAYA_PYTHON = barePython;
     try {
-      await writeFile(join(dir, "laya.py"), LAYA_STUB, "utf8");
-      process.env.PYTHONPATH = dir;
-      return await defaultRunner("python3", LAYA_SCRIPT, stdin);
-    } finally {
-      if (previousPath === undefined) delete process.env.PYTHONPATH;
-      else process.env.PYTHONPATH = previousPath;
-      await rm(dir, { recursive: true, force: true });
-    }
-  };
-
-  /** The question specs the embedded-script tests run through the stub. */
-  const scriptQuestions = (labels: Record<string, string>) => ({
-    verdict: {
-      type: "choice",
-      instructions: "Which is better?",
-      criteria: labels,
-    },
-    rating: {
-      type: "score",
-      instructions: "How helpful?",
-      criteria: ["bad", "ok", "good"],
-    },
-    urgent: { type: "noul", instructions: "Urgent?" },
-  });
-
-  /** Run the script and parse its answers, asserting a clean exit. */
-  const scriptAnswers = async (
-    stdin: string,
-  ): Promise<Record<string, unknown>> => {
-    const result = await runScript(stdin);
-    expect(result.code).toBe(0);
-    return (JSON.parse(result.stdout) as { answers: Record<string, unknown> })
-      .answers;
-  };
-
-  it("maps router answers to probabilities", async () => {
-    if (!pythonAvailable) return;
-    const answers = await scriptAnswers(
-      JSON.stringify({
+      const adapter = new SystemOneAdapterClient({
+        structuredOutputs: true,
+        llmAnswerMode: "probabilities",
+        provider: "laya",
         model: "router",
-        mode: "probabilities",
-        state: { body: "duplicate charge" },
-        questions: scriptQuestions({ A: "first", B: "second", tie: "equal" }),
-      }),
-    );
-    expect(answers.verdict).toEqual({ A: 0.6, B: 0.2, tie: 0.2 });
-    expect(answers.rating).toEqual({ 0: 1 / 3, 1: 1 / 3, 2: 1 / 3 });
-    expect(answers.urgent).toBe(0.83);
-  });
-
-  it("maps checkpoint answers to discrete values", async () => {
-    if (!pythonAvailable) return;
-    const answers = await scriptAnswers(
-      JSON.stringify({
-        model: "english",
-        mode: "discrete",
-        state: { body: "duplicate charge" },
-        questions: scriptQuestions({ A: "first", B: "second" }),
-      }),
-    );
-    expect(answers.verdict).toBe("A");
-    expect(answers.rating).toBe(2);
-    expect(answers.urgent).toBe(true);
-  });
-
-  it("loads the multilingual checkpoint with its subfolder", async () => {
-    if (!pythonAvailable) return;
-    const answers = await scriptAnswers(
-      JSON.stringify({
-        model: "multilingual",
-        mode: "probabilities",
-        state: { body: "doppelte Abbuchung" },
-        questions: { urgent: { type: "noul", instructions: "Urgent?" } },
-      }),
-    );
-    // Only the multilingual stub agent answers 0.42.
-    expect(answers.urgent).toBe(0.42);
+      });
+      await expect(
+        adapter.systemOne({ state: { body: "x" }, questions: QUESTIONS }),
+      ).rejects.toThrow(/laya python process exited.*No module named 'laya'/u);
+      await adapter.close();
+    } finally {
+      if (previous === undefined) delete process.env.LAYA_PYTHON;
+      else process.env.LAYA_PYTHON = previous;
+    }
   });
 });

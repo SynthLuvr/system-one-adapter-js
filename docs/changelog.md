@@ -30,6 +30,12 @@
   mode in an optional `typed` field on `ProviderRequestOptions`, so
   providers that answer typed questions directly no longer need to
   reverse-engineer them from the prompt or JSON schema
+- the laya provider’s tests run the real engine end to end — real python
+  one-shot, real `convaiinnovations/laya` checkpoints from the Hugging
+  Face hub — instead of stubbing the runner or the package; a repo-local
+  venv under `node_modules/.cache/laya-venv` (or any `LAYA_PYTHON`
+  interpreter) hosts it, and the engine-backed tests skip with setup
+  instructions when no interpreter has laya installed
 
 ## v0.3.0 (2026-09-20)
 

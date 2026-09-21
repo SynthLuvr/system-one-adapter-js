@@ -196,3 +196,22 @@ responses, so request construction, response parsing, error translation,
 retries, and the debug traces are verified end to end. Unhandled
 requests are rejected, so a test that triggers unintended network
 traffic fails.
+
+The laya tests go one step further and run the real decision engine:
+every laya evaluation spawns the provider’s python one-shot for real and
+answers with the actual `convaiinnovations/laya` checkpoints, which are
+downloaded from the Hugging Face hub on the first run (expect the first
+test to take a few minutes while they fetch). Point the suite at an
+interpreter with laya installed — a repo-local venv is picked up
+automatically (it lives under `node_modules/.cache` so the repo tooling
+ignores it):
+
+``` bash
+uv venv node_modules/.cache/laya-venv
+uv pip install --python node_modules/.cache/laya-venv laya \
+  --torch-backend=cpu
+```
+
+`pip install laya` into any `python3` works too, as does exporting
+`LAYA_PYTHON`. Without one, the engine-backed tests are skipped with
+setup instructions.
