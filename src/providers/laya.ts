@@ -1,6 +1,11 @@
 import { spawn } from "node:child_process";
 import { TypeSafeError } from "@typesafe-ai/sdk";
-import { type Question, serializeInstructionValue } from "../schema.js";
+import {
+  noulCriteriaNote,
+  type Question,
+  serializeInstructionValue,
+} from "../schema.js";
+import { describeError } from "../utils/errorHandling.js";
 import type {
   ClosableProvider,
   Message,
@@ -111,7 +116,7 @@ const defaultRunner: PythonRunner = (python, script, stdin) =>
   });
 
 /** Reject a failed python run or stdout that is not JSON. */
-const verifyPythonResult = (result: PythonResult): void => {
+const validatePythonResult = (result: PythonResult): void => {
   if (result.code !== 0) {
     const detail = result.stderr.trim().split("\n").slice(-4).join(" | ");
     throw new TypeSafeError(
@@ -122,14 +127,13 @@ const verifyPythonResult = (result: PythonResult): void => {
     JSON.parse(result.stdout);
   } catch (error) {
     throw new TypeSafeError(
-      "laya python process printed invalid JSON: " +
-        `${error instanceof Error ? error.message : String(error)}`,
+      `laya python process printed invalid JSON: ${describeError(error)}`,
     );
   }
 };
 
 /** One laya question, built from a validated adapter question. */
-const layaQuestion = (question: Question): LayaQuestion => {
+const toLayaQuestion = (question: Question): LayaQuestion => {
   const instructions = serializeInstructionValue(question.instructions);
   if (question.type === "choice") {
     const criteria: Record<string, string> = {};
@@ -143,15 +147,9 @@ const layaQuestion = (question: Question): LayaQuestion => {
       instructions,
       criteria: question.criteria.map(serializeInstructionValue),
     };
-  const criteria = question.criteria ?? null;
-  if (criteria === null) return { type: "noul", instructions };
-  // Mirror the prompt text an LLM judge would see, so a laya judge
-  // evaluates the same question an LLM provider is prompted with.
-  const trueCriteria = serializeInstructionValue(criteria.true ?? null);
-  const falseCriteria = serializeInstructionValue(criteria.false ?? null);
   return {
     type: "noul",
-    instructions: `${instructions}\nTrue criteria: ${trueCriteria}\nFalse criteria: ${falseCriteria}`,
+    instructions: `${instructions}${noulCriteriaNote(question)}`,
   };
 };
 
@@ -196,7 +194,7 @@ class LayaProvider implements ClosableProvider {
       );
     const questions: Record<string, LayaQuestion> = {};
     for (const [questionId, question] of Object.entries(typed.questions))
-      questions[questionId] = layaQuestion(question);
+      questions[questionId] = toLayaQuestion(question);
     const result = await this.#runner(
       this.#python,
       LAYA_SCRIPT,
@@ -207,7 +205,7 @@ class LayaProvider implements ClosableProvider {
         questions,
       }),
     );
-    verifyPythonResult(result);
+    validatePythonResult(result);
     // A local encoder has no token metering; the adapter still measures
     // latency, but cost columns stay excluded.
     return { text: result.stdout, inputTokens: 0, outputTokens: 0 };
@@ -216,9 +214,7 @@ class LayaProvider implements ClosableProvider {
   /** Map a laya process failure to an SDK error. */
   translateError(error: unknown): TypeSafeError {
     if (error instanceof TypeSafeError) return error;
-    return new TypeSafeError(
-      error instanceof Error ? error.message : String(error),
-    );
+    return new TypeSafeError(describeError(error));
   }
 }
 

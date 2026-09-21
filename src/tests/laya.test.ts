@@ -39,17 +39,34 @@ const fileExists = (path: string): Promise<boolean> =>
     () => false,
   );
 
-/** Resolve whether the given interpreter has the laya package importable. */
-const canImportLaya = (python: string): Promise<boolean> =>
+/** Whether the interpreter exits cleanly on the given arguments. */
+const exitsCleanly = (python: string, args: string[]): Promise<boolean> =>
   new Promise((resolve) => {
-    const child = spawn(python, [
-      "-c",
-      "import importlib.util, sys; " +
-        "sys.exit(0 if importlib.util.find_spec('laya') is not None else 1)",
-    ]);
+    const child = spawn(python, args);
     child.on("error", () => resolve(false));
     child.on("close", (code) => resolve(code === 0));
   });
+
+/** Resolve whether the given interpreter has the laya package importable. */
+const canImportLaya = (python: string): Promise<boolean> =>
+  exitsCleanly(python, [
+    "-c",
+    "import importlib.util, sys; " +
+      "sys.exit(0 if importlib.util.find_spec('laya') is not None else 1)",
+  ]);
+
+/** Run the body with LAYA_PYTHON set, restoring the previous value after. */
+const withLayaPython = (
+  interpreter: string,
+  body: () => Promise<void>,
+): Promise<void> => {
+  const previous = process.env.LAYA_PYTHON;
+  process.env.LAYA_PYTHON = interpreter;
+  return body().finally(() => {
+    if (previous === undefined) delete process.env.LAYA_PYTHON;
+    else process.env.LAYA_PYTHON = previous;
+  });
+};
 
 /**
  * Interpreter hosting the real laya package: an explicit `LAYA_PYTHON`
@@ -91,6 +108,15 @@ const client = (
     llmAnswerMode,
     normalizeProbabilities: true,
     model: new LayaProvider(model, { python: python() }),
+  });
+
+/** A client resolving `provider: "laya"` through the provider registry. */
+const builtInClient = (): SystemOneAdapterClient =>
+  new SystemOneAdapterClient({
+    structuredOutputs: true,
+    llmAnswerMode: "probabilities",
+    provider: "laya",
+    model: "router",
   });
 
 const QUESTIONS = {
@@ -159,15 +185,8 @@ describe("LayaProvider", () => {
   });
 
   it("routes requests through the LAYA_PYTHON interpreter", async () => {
-    const previous = process.env.LAYA_PYTHON;
-    process.env.LAYA_PYTHON = "adapter-no-such-laya-python";
-    try {
-      const adapter = new SystemOneAdapterClient({
-        structuredOutputs: true,
-        llmAnswerMode: "probabilities",
-        provider: "laya",
-        model: "router",
-      });
+    await withLayaPython("adapter-no-such-laya-python", async () => {
+      const adapter = builtInClient();
       await expect(
         adapter.systemOne({
           state: { body: "x" },
@@ -175,10 +194,7 @@ describe("LayaProvider", () => {
         }),
       ).rejects.toThrow(/adapter-no-such-laya-python/u);
       await adapter.close();
-    } finally {
-      if (previous === undefined) delete process.env.LAYA_PYTHON;
-      else process.env.LAYA_PYTHON = previous;
-    }
+    });
   });
 });
 
@@ -305,15 +321,8 @@ describe.skipIf(layaPython === undefined)(
     it("runs the built-in provider through the LAYA_PYTHON interpreter", {
       timeout: MODEL_TIMEOUT,
     }, async () => {
-      const previous = process.env.LAYA_PYTHON;
-      process.env.LAYA_PYTHON = python();
-      try {
-        const adapter = new SystemOneAdapterClient({
-          structuredOutputs: true,
-          llmAnswerMode: "probabilities",
-          provider: "laya",
-          model: "router",
-        });
+      await withLayaPython(python(), async () => {
+        const adapter = builtInClient();
         const response = await adapter.systemOne({
           state: { body: "A thoughtful and complete answer." },
           questions: { positive: noul("The answer is helpful.") },
@@ -323,10 +332,7 @@ describe.skipIf(layaPython === undefined)(
         expect(response.model).toBe("laya/router");
         expect(response.nouls.positive?.noul).toBeGreaterThanOrEqual(0);
         expect(response.nouls.positive?.noul).toBeLessThanOrEqual(1);
-      } finally {
-        if (previous === undefined) delete process.env.LAYA_PYTHON;
-        else process.env.LAYA_PYTHON = previous;
-      }
+      });
     });
   },
 );
@@ -347,11 +353,12 @@ describe("a missing laya install", () => {
   beforeAll(async () => {
     const dir = await mkdtemp(join(tmpdir(), "adapter-laya-bare-"));
     bareVenvDir = dir;
-    const created = await new Promise<boolean>((resolve) => {
-      const child = spawn("python3", ["-m", "venv", "--without-pip", dir]);
-      child.on("error", () => resolve(false));
-      child.on("close", (code) => resolve(code === 0));
-    });
+    const created = await exitsCleanly("python3", [
+      "-m",
+      "venv",
+      "--without-pip",
+      dir,
+    ]);
     if (created) barePython = join(bareVenvDir, "bin", "python");
     else await discard();
   }, 60_000);
@@ -362,22 +369,12 @@ describe("a missing laya install", () => {
 
   it("surfaces the python failure through the built-in provider", async (context) => {
     if (barePython === undefined) return context.skip();
-    const previous = process.env.LAYA_PYTHON;
-    process.env.LAYA_PYTHON = barePython;
-    try {
-      const adapter = new SystemOneAdapterClient({
-        structuredOutputs: true,
-        llmAnswerMode: "probabilities",
-        provider: "laya",
-        model: "router",
-      });
+    await withLayaPython(barePython, async () => {
+      const adapter = builtInClient();
       await expect(
         adapter.systemOne({ state: { body: "x" }, questions: QUESTIONS }),
       ).rejects.toThrow(/laya python process exited.*No module named 'laya'/u);
       await adapter.close();
-    } finally {
-      if (previous === undefined) delete process.env.LAYA_PYTHON;
-      else process.env.LAYA_PYTHON = previous;
-    }
+    });
   });
 });
