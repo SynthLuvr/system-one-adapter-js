@@ -3,6 +3,7 @@ import {
   AnthropicProvider,
   APIError,
   buildProvider,
+  ClaudeCodeProvider,
   choice,
   Message,
   noul,
@@ -32,6 +33,9 @@ describe("public API", () => {
     );
     expect(buildProvider("anthropic", "test-model")).toBeInstanceOf(
       AnthropicProvider,
+    );
+    expect(buildProvider("claude_code", "test-model")).toBeInstanceOf(
+      ClaudeCodeProvider,
     );
     expect(noul("Yes or no?")).toEqual({
       type: "noul",

@@ -6,6 +6,8 @@ import { SystemOneAdapterClient } from "./client.js";
 import {
   AnthropicProvider,
   buildProvider,
+  ClaudeCodeProvider,
+  type ClaudeCodeProviderOptions,
   type ClosableProvider,
   type LlmAttempt,
   type Message,
@@ -48,6 +50,8 @@ export {
   type AnswerMode,
   AnthropicProvider,
   buildProvider,
+  ClaudeCodeProvider,
+  type ClaudeCodeProviderOptions,
   type ClosableProvider,
   type LlmAttempt,
   type Message,
