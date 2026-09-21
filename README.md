@@ -243,5 +243,7 @@ uv pip install --python node_modules/.cache/laya-venv laya \
 ```
 
 `pip install laya` into any `python3` works too, as does exporting
-`LAYA_PYTHON`. Without one, the engine-backed tests are skipped with
-setup instructions.
+`LAYA_PYTHON`. Nothing is ever skipped: without an interpreter the
+engine-backed tests fail with these instructions. CI provisions a cached
+CPU-only venv and checkpoints so every pull request runs the full suite,
+laya engine included.

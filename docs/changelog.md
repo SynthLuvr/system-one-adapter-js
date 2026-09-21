@@ -42,8 +42,10 @@
   one-shot, real `convaiinnovations/laya` checkpoints from the Hugging
   Face hub — instead of stubbing the runner or the package; a repo-local
   venv under `node_modules/.cache/laya-venv` (or any `LAYA_PYTHON`
-  interpreter) hosts it, and the engine-backed tests skip with setup
-  instructions when no interpreter has laya installed
+  interpreter) hosts it, and nothing is ever skipped: without an
+  interpreter the engine-backed tests fail with setup instructions,
+  while CI provisions a cached CPU-only venv (and checkpoints) so every
+  pull request runs the full suite
 
 ## v0.3.0 (2026-09-20)
 
