@@ -32,7 +32,7 @@ const client = new SystemOneAdapterClient({
 const response = await client.systemOne({
   state: "This book was a delight to read.",
   questions: { positive: noul("The book review is positive.") },
-  provider: "openai", // "openai", "anthropic", or "claude_code"
+  provider: "openai", // "openai", "anthropic", "claude_code", or "laya"
   model: "gpt-4o-mini",
 });
 ```
@@ -109,6 +109,45 @@ arguments. Requires the `claude` CLI installed and authenticated. The
 CLI prefers an inherited `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`)
 over its login, so unset it in `env` when a process mixes this provider
 with direct Anthropic API calls.
+
+### Local decision engine: laya
+
+For evaluations that need no text generation at all, the adapter ships a
+provider for [laya](https://github.com/NandhaKishorM/laya), a local
+System 1 decision engine that answers typed questions (`choice`,
+`score`, `noul`) with calibrated probabilities in a single forward pass:
+
+``` ts
+const client = new SystemOneAdapterClient({
+  structuredOutputs: true, // ignored by laya; answers are always typed
+  llmAnswerMode: "probabilities",
+  provider: "laya",
+  model: "router", // "router" | "english" | "multilingual" | "typed-decisions"
+});
+```
+
+Or construct a `LayaProvider` directly to override the python
+interpreter:
+
+``` ts
+import { LayaProvider } from "system-one-adapter";
+
+const response = await client.systemOne({
+  state,
+  questions,
+  model: new LayaProvider("router", { python: "/usr/bin/python3.12" }),
+});
+```
+
+laya runs as a local python package (`pip install laya`); each request
+spawns one short-lived `python3` process (override with the
+`LAYA_PYTHON` environment variable or the `python` option). The first
+run downloads the checkpoints from the Hugging Face hub. Because laya is
+a local encoder, token counts stay zero: latency is reported while cost
+columns stay excluded. Each provider request carries the validated
+questions in `ProviderRequestOptions.typed`, so laya evaluates the same
+typed questions an LLM provider is prompted with — including score
+questions, which laya answers natively.
 
 ### Response
 
@@ -187,3 +226,24 @@ responses, so request construction, response parsing, error translation,
 retries, and the debug traces are verified end to end. Unhandled
 requests are rejected, so a test that triggers unintended network
 traffic fails.
+
+The laya tests go one step further and run the real decision engine:
+every laya evaluation spawns the provider’s python one-shot for real and
+answers with the actual `convaiinnovations/laya` checkpoints, which are
+downloaded from the Hugging Face hub on the first run (expect the first
+test to take a few minutes while they fetch). Point the suite at an
+interpreter with laya installed — a repo-local venv is picked up
+automatically (it lives under `node_modules/.cache` so the repo tooling
+ignores it):
+
+``` bash
+uv venv node_modules/.cache/laya-venv
+uv pip install --python node_modules/.cache/laya-venv laya \
+  --torch-backend=cpu
+```
+
+`pip install laya` into any `python3` works too, as does exporting
+`LAYA_PYTHON`. Nothing is ever skipped: without an interpreter the
+engine-backed tests fail with these instructions. CI provisions a cached
+CPU-only venv and checkpoints so every pull request runs the full suite,
+laya engine included.

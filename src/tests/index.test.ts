@@ -5,6 +5,8 @@ import {
   buildProvider,
   ClaudeCodeProvider,
   choice,
+  LAYA_MODELS,
+  LayaProvider,
   Message,
   noul,
   OpenAIProvider,
@@ -28,6 +30,7 @@ describe("public API", () => {
     expect(SystemOneAdapterClient).toBeTypeOf("function");
     expect(OpenAIProvider).toBeTypeOf("function");
     expect(AnthropicProvider).toBeTypeOf("function");
+    expect(LayaProvider).toBeTypeOf("function");
     expect(buildProvider("openai", "test-model")).toBeInstanceOf(
       OpenAIProvider,
     );
@@ -37,6 +40,13 @@ describe("public API", () => {
     expect(buildProvider("claude_code", "test-model")).toBeInstanceOf(
       ClaudeCodeProvider,
     );
+    expect(buildProvider("laya", "router")).toBeInstanceOf(LayaProvider);
+    expect(LAYA_MODELS).toEqual([
+      "router",
+      "english",
+      "multilingual",
+      "typed-decisions",
+    ]);
     expect(noul("Yes or no?")).toEqual({
       type: "noul",
       instructions: "Yes or no?",

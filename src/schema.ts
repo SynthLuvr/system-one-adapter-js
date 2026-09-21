@@ -80,6 +80,9 @@ const questionTypes = scope({
 /** A JSON value used for instructions, criteria, and state. */
 type EntryType = typeof questionTypes.EntryType.infer;
 
+/** A validated noul question. */
+type NoulQuestion = typeof questionTypes.NoulQuestion.infer;
+
 /** A validated question in provider-neutral form. */
 type Question = typeof questionTypes.Question.infer;
 
@@ -144,6 +147,19 @@ const serializeInstructionValue = (value: unknown): string => {
   return JSON.stringify(value);
 };
 
+/**
+ * The true/false criteria of a noul question, formatted as the answer-field
+ * descriptions render them so typed-question providers mirror the prompt an
+ * LLM provider sees; empty when the question carries no criteria.
+ */
+const noulCriteriaNote = (question: NoulQuestion): string => {
+  const criteria = question.criteria ?? null;
+  if (criteria === null) return "";
+  const trueCriteria = serializeInstructionValue(criteria.true ?? null);
+  const falseCriteria = serializeInstructionValue(criteria.false ?? null);
+  return `\nTrue criteria: ${trueCriteria}\nFalse criteria: ${falseCriteria}`;
+};
+
 /** The criteria of a score or choice question, keyed by answer label. */
 const criteriaByLabel = (question: Question): [string, EntryType][] => {
   if (question.type === "score")
@@ -199,16 +215,7 @@ const fieldDescription = (question: Question, mode: AnswerMode): string => {
     return `${description}\nRequired probability keys:\n${choices}`;
   }
 
-  if (question.criteria === null || question.criteria === undefined)
-    return description;
-
-  const trueCriteria = serializeInstructionValue(
-    question.criteria.true ?? null,
-  );
-  const falseCriteria = serializeInstructionValue(
-    question.criteria.false ?? null,
-  );
-  return `${description}\nTrue criteria: ${trueCriteria}\nFalse criteria: ${falseCriteria}`;
+  return `${description}${noulCriteriaNote(question)}`;
 };
 
 /** The value shape one question's answer must take. */
@@ -437,9 +444,12 @@ export {
   type EntryType,
   InvalidQuestionsError,
   type JsonSchema,
+  type NoulQuestion,
+  noulCriteriaNote,
   type OutputSpec,
   OutputValidationError,
   type Question,
+  serializeInstructionValue,
   type ValidatedAnswer,
   validateOutput,
   validateQuestions,
