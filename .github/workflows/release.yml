@@ -121,6 +121,11 @@ jobs:
           else
             npm version "$BUMP" --no-git-tag-version >/dev/null
           fi
+          # npm version rewrites package.json with its own serializer: short
+          # arrays like "files" get exploded onto multiple lines, which fails
+          # the biome format check inside prepublishOnly's re-lint. Re-apply
+          # the project formatting so the publish gate sees the canonical file.
+          pnpm format
           echo "NEW_VERSION=$(node -p "require('./package.json').version")" >> "$GITHUB_ENV"
 
       # Publish via the npm CLI — it performs the OIDC token exchange against
