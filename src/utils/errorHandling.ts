@@ -211,6 +211,7 @@ const providerErrorTranslator =
   };
 
 export {
+  describeError,
   type ProviderErrorClasses,
   providerErrorTranslator,
   type RetryReason,

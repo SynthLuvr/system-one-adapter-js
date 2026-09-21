@@ -399,7 +399,10 @@ interface SystemOneAdapterClientOptions {
   nRetryMalformedStructure?: number;
   /** Policy for transient provider failures. Default: no retries. */
   retry?: Partial<RetryPolicy>;
-  /** Default provider for model names: `"openai"` or `"anthropic"`. */
+  /**
+   * Default provider for model names: `"openai"`, `"anthropic"`, or
+   * `"claude_code"`.
+   */
   provider?: ProviderName;
   /** Default model name or caller-owned provider instance. */
   model?: string | Provider;
@@ -517,7 +520,7 @@ class SystemOneAdapterClient {
     if (name === undefined)
       throw new Error(
         "A provider is required: set provider='openai', 'anthropic', or " +
-          "'laya', or pass a provider instance as the model.",
+          "'claude_code', 'laya', or pass a provider instance as the model.",
       );
     const key = `${name}:${modelValue}`;
     let provider = this.#ownedProviders.get(key);

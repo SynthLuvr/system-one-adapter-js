@@ -32,7 +32,7 @@ const client = new SystemOneAdapterClient({
 const response = await client.systemOne({
   state: "This book was a delight to read.",
   questions: { positive: noul("The book review is positive.") },
-  provider: "openai", // "openai", "anthropic", or "laya"
+  provider: "openai", // "openai", "anthropic", "claude_code", or "laya"
   model: "gpt-4o-mini",
 });
 ```
@@ -79,6 +79,36 @@ const response = await client.systemOne({
 A response that reaches the limit throws a `TypeSafeError` with
 instructions to increase `maxTokens` or request fewer questions; it does
 not consume malformed-output retries.
+
+Evaluations can also run through the Claude Code CLI, using its own
+login for access. Each request spawns one headless process —
+`MAX_THINKING_TOKENS=0 claude -p --output-format json --model claude-haiku-4-5 --tools "" --no-session-persistence`
+— with the evaluation system prompt on `--system-prompt`, the answer
+schema on `--json-schema` in structured mode, and the document (plus any
+corrective conversation turns, labeled) piped on stdin:
+
+``` ts
+const response = await client.systemOne({
+  state,
+  questions,
+  provider: "claude_code",
+  model: "claude-haiku-4-5",
+});
+```
+
+The CLI returns one JSON result per process. API failures keep their
+HTTP status, so the retry policy treats 429/5xx results as transient; a
+missing or crashing CLI raises `APIConnectionError`, and
+`new ClaudeCodeProvider(model, { timeoutMs })` aborts hung processes
+with `APITimeoutError`. Reported input tokens include the CLI’s
+cache-write and cache-read tokens, since its own system prompt dominates
+small requests. `MAX_THINKING_TOKENS=0` (thinking off) is the default;
+`env` adds overrides — a value of `undefined` removes a variable —
+`command` selects another executable, and `args` passes extra CLI
+arguments. Requires the `claude` CLI installed and authenticated. The
+CLI prefers an inherited `ANTHROPIC_API_KEY` (or `ANTHROPIC_AUTH_TOKEN`)
+over its login, so unset it in `env` when a process mixes this provider
+with direct Anthropic API calls.
 
 ### Local decision engine: laya
 

@@ -6,6 +6,8 @@ import { SystemOneAdapterClient } from "./client.js";
 import {
   AnthropicProvider,
   buildProvider,
+  ClaudeCodeProvider,
+  type ClaudeCodeProviderOptions,
   type ClosableProvider,
   LAYA_MODELS,
   type LayaModel,
@@ -55,6 +57,8 @@ export {
   type AnswerMode,
   AnthropicProvider,
   buildProvider,
+  ClaudeCodeProvider,
+  type ClaudeCodeProviderOptions,
   type ClosableProvider,
   LAYA_MODELS,
   type LayaModel,

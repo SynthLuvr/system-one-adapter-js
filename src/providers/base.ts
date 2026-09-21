@@ -5,7 +5,7 @@ import type { Question } from "../schema.js";
 import type { AnswerMode } from "../utils/probabilityNormalization.js";
 
 /** The provider an owned model name is built from. */
-type ProviderName = "openai" | "anthropic" | "laya";
+type ProviderName = "openai" | "anthropic" | "claude_code" | "laya";
 
 /** One chat message in provider-neutral form. */
 interface Message {

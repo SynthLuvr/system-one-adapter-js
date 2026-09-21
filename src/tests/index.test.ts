@@ -3,6 +3,7 @@ import {
   AnthropicProvider,
   APIError,
   buildProvider,
+  ClaudeCodeProvider,
   choice,
   LAYA_MODELS,
   LayaProvider,
@@ -35,6 +36,9 @@ describe("public API", () => {
     );
     expect(buildProvider("anthropic", "test-model")).toBeInstanceOf(
       AnthropicProvider,
+    );
+    expect(buildProvider("claude_code", "test-model")).toBeInstanceOf(
+      ClaudeCodeProvider,
     );
     expect(buildProvider("laya", "router")).toBeInstanceOf(LayaProvider);
     expect(LAYA_MODELS).toEqual([

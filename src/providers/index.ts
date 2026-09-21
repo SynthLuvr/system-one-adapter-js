@@ -5,19 +5,28 @@ import type {
   ProviderName,
   TypedQuestions,
 } from "./base.js";
+import {
+  ClaudeCodeProvider,
+  type ClaudeCodeProviderOptions,
+} from "./claude-code.js";
 import { type LayaModel, LayaProvider } from "./laya.js";
 import { OpenAIProvider } from "./openai.js";
+
+/** The provider classes a model selector can name. */
+const providerClasses = {
+  openai: OpenAIProvider,
+  anthropic: AnthropicProvider,
+  claude_code: ClaudeCodeProvider,
+  laya: LayaProvider,
+} as const;
 
 /** Build the provider named by a model selector. */
 const buildProvider = (
   provider: ProviderName,
   modelName: string,
-): ClosableProvider => {
-  if (provider === "openai") return new OpenAIProvider(modelName);
-  if (provider === "anthropic") return new AnthropicProvider(modelName);
+): ClosableProvider =>
   // laya model names are a closed set, validated inside the provider.
-  return new LayaProvider(modelName as LayaModel);
-};
+  new providerClasses[provider](modelName as LayaModel);
 
 export {
   captureAttempt,
@@ -37,6 +46,8 @@ export {
 export {
   AnthropicProvider,
   buildProvider,
+  ClaudeCodeProvider,
+  type ClaudeCodeProviderOptions,
   type ClosableProvider,
   OpenAIProvider,
   type Provider,

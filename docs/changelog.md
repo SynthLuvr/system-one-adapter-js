@@ -4,6 +4,14 @@
 
 ### Features
 
+- new `claude_code` provider evaluates through the Claude Code CLI: each
+  request spawns
+  `MAX_THINKING_TOKENS=0 claude -p --output-format json --model … --tools "" --no-session-persistence`,
+  passing the answer schema to `--json-schema` in structured mode and
+  the conversation on stdin; CLI API failures map to the SDK error
+  classes with their HTTP status so the retry policy applies, hung
+  processes abort with `APITimeoutError`, and input tokens include the
+  CLI’s cache-write and cache-read tokens
 - all runtime type validation now runs through `arktype`: question
   collections, model output, provider response payloads, and constructor
   options are validated with arktype schemas whose inferences replace
