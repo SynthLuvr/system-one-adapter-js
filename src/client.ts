@@ -516,7 +516,8 @@ class SystemOneAdapterClient {
     const name = providerName ?? this.provider;
     if (name === undefined)
       throw new Error(
-        "A provider is required: set provider='openai' or 'anthropic', or pass a provider instance as the model.",
+        "A provider is required: set provider='openai', 'anthropic', or " +
+          "'laya', or pass a provider instance as the model.",
       );
     const key = `${name}:${modelValue}`;
     let provider = this.#ownedProviders.get(key);
@@ -574,7 +575,15 @@ class SystemOneAdapterClient {
       modelName,
       preparedQuestions,
       outputSpec,
-      { schema, structured: this.structuredOutputs },
+      {
+        schema,
+        structured: this.structuredOutputs,
+        typed: {
+          state,
+          questions: preparedQuestions,
+          answerMode: this.llmAnswerMode,
+        },
+      },
       baseMessages,
       this.nRetryMalformedStructure,
       this.llmAnswerMode,

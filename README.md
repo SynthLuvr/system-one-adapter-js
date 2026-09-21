@@ -32,7 +32,7 @@ const client = new SystemOneAdapterClient({
 const response = await client.systemOne({
   state: "This book was a delight to read.",
   questions: { positive: noul("The book review is positive.") },
-  provider: "openai", // "openai" or "anthropic"
+  provider: "openai", // "openai", "anthropic", or "laya"
   model: "gpt-4o-mini",
 });
 ```
@@ -79,6 +79,44 @@ const response = await client.systemOne({
 A response that reaches the limit throws a `TypeSafeError` with
 instructions to increase `maxTokens` or request fewer questions; it does
 not consume malformed-output retries.
+
+### Local decision engine: laya
+
+For evaluations that need no text generation at all, the adapter ships a
+provider for [laya](https://github.com/NandhaKishorM/laya), a local
+System 1 decision engine that answers typed questions (`choice`,
+`score`, `noul`) with calibrated probabilities in a single forward pass:
+
+``` ts
+const client = new SystemOneAdapterClient({
+  structuredOutputs: true, // ignored by laya; answers are always typed
+  llmAnswerMode: "probabilities",
+  provider: "laya",
+  model: "router", // "router" | "english" | "multilingual" | "typed-decisions"
+});
+```
+
+Or pass an instance to override the python interpreter per provider:
+
+``` ts
+import { LayaProvider } from "system-one-adapter";
+
+const response = await client.systemOne({
+  state,
+  questions,
+  model: new LayaProvider("router", { python: "/usr/bin/python3.12" }),
+});
+```
+
+laya runs as a local python package (`pip install laya`); each request
+spawns one short-lived `python3` process (override with the
+`LAYA_PYTHON` environment variable or the `python` option). The first
+run downloads the checkpoints from the Hugging Face hub. Because laya is
+a local encoder, token counts stay zero: latency is reported while cost
+columns stay excluded. Each provider request carries the validated
+questions in `ProviderRequestOptions.typed`, so laya evaluates the same
+typed questions an LLM provider is prompted with — including score
+questions, which laya answers natively.
 
 ### Response
 

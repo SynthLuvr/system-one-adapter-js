@@ -1,9 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { TypeSafeError } from "@typesafe-ai/sdk";
 import { type ArkErrors, type } from "arktype";
+import type { Question } from "../schema.js";
+import type { AnswerMode } from "../utils/probabilityNormalization.js";
 
 /** The provider an owned model name is built from. */
-type ProviderName = "openai" | "anthropic";
+type ProviderName = "openai" | "anthropic" | "laya";
 
 /** One chat message in provider-neutral form. */
 interface Message {
@@ -18,12 +20,25 @@ interface ProviderResult {
   outputTokens: number;
 }
 
+/** The typed-question view of a request, for providers that answer the
+ * questions directly instead of prompting a model. */
+interface TypedQuestions {
+  /** The state the questions are evaluated against. */
+  state: unknown;
+  /** Validated questions in provider-neutral form. */
+  questions: Record<string, Question>;
+  /** The answer shape the client validates: probabilities or discrete. */
+  answerMode: AnswerMode;
+}
+
 /** Options for one provider request. */
 interface ProviderRequestOptions {
   /** JSON schema for the model's answer. */
   schema: Record<string, unknown>;
   /** Whether to use native structured output. */
   structured: boolean;
+  /** Typed request data, when the client shares its questions. */
+  typed?: TypedQuestions;
 }
 
 /** Perform one asynchronous model request in native or prompted output mode. */
@@ -196,4 +211,5 @@ export {
   recordResponse,
   renderMessages,
   systemPrompt,
+  type TypedQuestions,
 };

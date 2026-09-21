@@ -17,6 +17,19 @@
   inferred question types
 - test helpers validate recorded JSON via arktype as well, removing
   `as never` and `as unknown as` assertions from the suite
+- new `laya` provider runs the local System 1 decision engine
+  ([laya](https://github.com/NandhaKishorM/laya), `pip install laya`)
+  through a one-shot python process per request: named with
+  `provider: "laya"` plus one of the `router`, `english`,
+  `multilingual`, or `typed-decisions` checkpoints (or constructed
+  directly as `LayaProvider`), it answers choice, score, and noul
+  questions natively with calibrated probabilities, so token counts stay
+  zero and only latency is metered; the python interpreter defaults to
+  `python3` and is overridable via `LAYA_PYTHON` or the `python` option
+- provider requests now carry the validated questions, state, and answer
+  mode in an optional `typed` field on `ProviderRequestOptions`, so
+  providers that answer typed questions directly no longer need to
+  reverse-engineer them from the prompt or JSON schema
 
 ## v0.3.0 (2026-09-20)
 

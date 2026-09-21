@@ -440,6 +440,7 @@ export {
   type OutputSpec,
   OutputValidationError,
   type Question,
+  serializeInstructionValue,
   type ValidatedAnswer,
   validateOutput,
   validateQuestions,
