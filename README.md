@@ -96,7 +96,8 @@ const client = new SystemOneAdapterClient({
 });
 ```
 
-Or pass an instance to override the python interpreter per provider:
+Or construct a `LayaProvider` directly to override the python
+interpreter:
 
 ``` ts
 import { LayaProvider } from "system-one-adapter";

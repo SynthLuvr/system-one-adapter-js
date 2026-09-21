@@ -16,19 +16,74 @@ import {
   type PythonResult,
 } from "../providers/laya.js";
 
+/** One question of the stdin payload handed to the python bridge. */
+type PayloadQuestion =
+  | { type: "choice"; instructions: string; criteria: Record<string, string> }
+  | { type: "score"; instructions: string; criteria: string[] }
+  | { type: "noul"; instructions: string };
+
 /** The stdin payload handed to the python bridge. */
 type Payload = {
   model: string;
   mode: string;
   state: unknown;
-  questions: Record<
-    string,
-    {
-      type: string;
-      instructions: string;
-      criteria?: Record<string, string> | string[];
+  questions: Record<string, PayloadQuestion>;
+};
+
+/** A laya-native answer, as the laya engine itself would return it. */
+type StubLayaAnswer =
+  | {
+      type: "choice";
+      choice: string;
+      confidence: number;
+      probabilities: Record<string, number>;
     }
-  >;
+  | {
+      type: "score";
+      score: number;
+      confidence: number;
+      probabilities: Record<string, number>;
+    }
+  | { type: "noul"; noul: number };
+
+/** The laya-native answer the stub engine returns for one question. */
+const stubLayaAnswer = (question: PayloadQuestion): StubLayaAnswer => {
+  if (question.type === "choice") {
+    const labels = Object.keys(question.criteria);
+    return {
+      type: "choice",
+      choice: labels[0],
+      confidence: 0.6,
+      probabilities: Object.fromEntries(
+        labels.map((label, index) => [
+          label,
+          index === 0 ? 0.6 : 0.4 / Math.max(labels.length - 1, 1),
+        ]),
+      ),
+    };
+  }
+  if (question.type === "score")
+    return {
+      type: "score",
+      score: 1.6,
+      confidence: 0.5,
+      probabilities: Object.fromEntries(
+        question.criteria.map((_, index) => [
+          String(index),
+          1 / question.criteria.length,
+        ]),
+      ),
+    };
+  return { type: "noul", noul: 0.83 };
+};
+
+/** Map a laya answer the way the embedded script maps results. */
+const adaptedAnswer = (laya: StubLayaAnswer, mode: string): unknown => {
+  if (laya.type === "noul")
+    return mode === "discrete" ? laya.noul >= 0.5 : laya.noul;
+  if (mode === "discrete")
+    return laya.type === "score" ? Math.round(laya.score) : laya.choice;
+  return laya.probabilities;
 };
 
 /**
@@ -42,51 +97,9 @@ const fakeRunner = async (
 ): Promise<PythonResult> => {
   expect(script).toBe(LAYA_SCRIPT);
   const payload = JSON.parse(stdin) as Payload;
-  const layaAnswers: Record<string, Record<string, unknown>> = {};
-  for (const [questionId, question] of Object.entries(payload.questions))
-    if (question.type === "choice") {
-      const labels = Object.keys(question.criteria as Record<string, string>);
-      layaAnswers[questionId] = {
-        type: "choice",
-        choice: labels[0],
-        confidence: 0.6,
-        probabilities: Object.fromEntries(
-          labels.map((label, index) => [
-            label,
-            index === 0 ? 0.6 : 0.4 / Math.max(labels.length - 1, 1),
-          ]),
-        ),
-      };
-    } else if (question.type === "score") {
-      layaAnswers[questionId] = {
-        type: "score",
-        score: 1.6,
-        confidence: 0.5,
-        probabilities: Object.fromEntries(
-          (question.criteria as string[]).map((_, index) => [
-            String(index),
-            1 / (question.criteria as string[]).length,
-          ]),
-        ),
-      };
-    } else {
-      layaAnswers[questionId] = { type: "noul", noul: 0.83 };
-    }
-
   const answers: Record<string, unknown> = {};
-  for (const [questionId, laya] of Object.entries(layaAnswers))
-    if (payload.mode === "discrete") {
-      if (payload.questions[questionId]?.type === "noul")
-        answers[questionId] = (laya.noul as number) >= 0.5;
-      else if (payload.questions[questionId]?.type === "score")
-        answers[questionId] = Math.round(laya.score as number);
-      else answers[questionId] = laya.choice;
-    } else if (payload.questions[questionId]?.type === "noul") {
-      answers[questionId] = laya.noul;
-    } else {
-      answers[questionId] = laya.probabilities;
-    }
-
+  for (const [questionId, question] of Object.entries(payload.questions))
+    answers[questionId] = adaptedAnswer(stubLayaAnswer(question), payload.mode);
   return { stdout: JSON.stringify({ answers }), stderr: "", code: 0 };
 };
 
@@ -153,27 +166,26 @@ describe("LayaProvider", () => {
       assistant_1: "a",
       assistant_2: "b",
     });
-    const verdict = received[0]?.questions.verdict;
-    expect(verdict?.type).toBe("choice");
-    expect(verdict?.instructions).toBe("Which response is better?");
-    expect(verdict?.criteria).toEqual({
-      A: "Assistant 1 is better",
-      B: "Assistant 2 is better",
-      tie: "Equally good",
+    expect(received[0]?.questions.verdict).toEqual({
+      type: "choice",
+      instructions: "Which response is better?",
+      criteria: {
+        A: "Assistant 1 is better",
+        B: "Assistant 2 is better",
+        tie: "Equally good",
+      },
     });
-    const isSafe = received[0]?.questions.is_safe;
-    expect(isSafe?.type).toBe("noul");
-    expect(isSafe?.instructions).toBe(
-      "Is the exchange safe?\nTrue criteria: No harmful content\n" +
+    expect(received[0]?.questions.is_safe).toEqual({
+      type: "noul",
+      instructions:
+        "Is the exchange safe?\nTrue criteria: No harmful content\n" +
         "False criteria: Contains harmful content",
-    );
-    const rating = received[0]?.questions.rating;
-    expect(rating?.type).toBe("score");
-    expect(rating?.criteria).toEqual([
-      "Unhelpful",
-      "Somewhat helpful",
-      "Very helpful",
-    ]);
+    });
+    expect(received[0]?.questions.rating).toEqual({
+      type: "score",
+      instructions: "How helpful is the response?",
+      criteria: ["Unhelpful", "Somewhat helpful", "Very helpful"],
+    });
 
     expect(response.model).toBe("laya/router");
     expect(response.usage.input_tokens_total).toBe(0);

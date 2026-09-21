@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { TypeSafeError } from "@typesafe-ai/sdk";
 import { type Question, serializeInstructionValue } from "../schema.js";
-import type { AnswerMode } from "../utils/probabilityNormalization.js";
 import type {
   ClosableProvider,
   Message,
@@ -23,16 +22,16 @@ type LayaModel = (typeof LAYA_MODELS)[number];
 /** Options for constructing a laya provider. */
 interface LayaOptions {
   /** Python interpreter hosting the laya package; default `python3`. */
-  readonly python?: string;
+  python?: string;
   /** Runs the one-shot python process; injectable for offline tests. */
-  readonly runPython?: PythonRunner;
+  runPython?: PythonRunner;
 }
 
 /** Result of one python one-shot invocation. */
 interface PythonResult {
-  readonly stdout: string;
-  readonly stderr: string;
-  readonly code: number;
+  stdout: string;
+  stderr: string;
+  code: number;
 }
 
 /** Runs a python script with stdin, resolving when the process exits. */
@@ -48,19 +47,9 @@ type LayaQuestion =
   | { type: "score"; instructions: string; criteria: string[] }
   | { type: "noul"; instructions: string };
 
-/** Payload handed to the python bridge on stdin. */
-interface LayaPayload {
-  readonly model: LayaModel;
-  readonly mode: AnswerMode;
-  readonly state: unknown;
-  readonly questions: Record<string, LayaQuestion>;
-}
-
 /**
  * One-shot python script: read {model, mode, state, questions} from stdin,
- * run the laya engine, print adapter-shaped answers to stdout. laya answers
- * typed questions natively (choice and score probabilities, noul
- * probabilities), so no text generation is involved.
+ * run the laya engine, print adapter-shaped answers to stdout.
  */
 const LAYA_SCRIPT = `
 import json, sys
@@ -76,12 +65,8 @@ if model == "router":
     engine = Router().predict
 else:
     import laya
-    subfolder = {"english": None, "multilingual": "multilingual",
-                 "typed-decisions": "typed-decisions"}[model]
-    if subfolder is None:
-        engine = laya.load("convaiinnovations/laya").predict
-    else:
-        engine = laya.load("convaiinnovations/laya", subfolder=subfolder).predict
+    subfolder = None if model == "english" else model
+    engine = laya.load("convaiinnovations/laya", subfolder=subfolder).predict
 result = engine(state, questions)
 
 answers = {}
@@ -105,28 +90,43 @@ print(json.dumps({"answers": answers}))
 /** Spawn the python one-shot process and collect its output. */
 const defaultRunner: PythonRunner = (python, script, stdin) =>
   new Promise((resolve) => {
-    const child = spawn(python, ["-c", script], {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
+    const child = spawn(python, ["-c", script]);
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
     });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
     });
     child.on("error", (error) =>
-      resolve({
-        stdout: "",
-        stderr: `${error.message}\n${stderr}`,
-        code: -1,
-      }),
+      resolve({ stdout: "", stderr: `${error.message}\n${stderr}`, code: -1 }),
     );
     child.on("close", (code) => resolve({ stdout, stderr, code: code ?? -1 }));
+    // Python may exit before draining stdin; the EPIPE it raises is noise.
     child.stdin.on("error", () => undefined);
     child.stdin.end(stdin, "utf8");
   });
+
+/** Reject a failed python run or stdout that is not JSON. */
+const verifyPythonResult = (result: PythonResult): void => {
+  if (result.code !== 0) {
+    const detail = result.stderr.trim().split("\n").slice(-4).join(" | ");
+    throw new TypeSafeError(
+      `laya python process exited ${result.code}: ${detail}`,
+    );
+  }
+  try {
+    JSON.parse(result.stdout);
+  } catch (error) {
+    throw new TypeSafeError(
+      "laya python process printed invalid JSON: " +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+};
 
 /** One laya question, built from a validated adapter question. */
 const layaQuestion = (question: Question): LayaQuestion => {
@@ -179,7 +179,7 @@ class LayaProvider implements ClosableProvider {
 
   /** No-op: each request spawns a fresh short-lived process. */
   close(): void {
-    // Nothing to release; python processes exit with each request.
+    // Nothing to release.
   }
 
   /** Run one evaluation through the local laya package. */
@@ -197,30 +197,17 @@ class LayaProvider implements ClosableProvider {
     const questions: Record<string, LayaQuestion> = {};
     for (const [questionId, question] of Object.entries(typed.questions))
       questions[questionId] = layaQuestion(question);
-    const payload: LayaPayload = {
-      model: this.#model,
-      mode: typed.answerMode,
-      state: typed.state,
-      questions,
-    };
     const result = await this.#runner(
       this.#python,
       LAYA_SCRIPT,
-      JSON.stringify(payload),
+      JSON.stringify({
+        model: this.#model,
+        mode: typed.answerMode,
+        state: typed.state,
+        questions,
+      }),
     );
-    if (result.code !== 0) {
-      const detail = result.stderr.trim().split("\n").slice(-4).join(" | ");
-      throw new TypeSafeError(
-        `laya python process exited ${result.code}: ${detail}`,
-      );
-    }
-    try {
-      JSON.parse(result.stdout);
-    } catch (error) {
-      throw new TypeSafeError(
-        `laya python process printed invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
+    verifyPythonResult(result);
     // A local encoder has no token metering; the adapter still measures
     // latency, but cost columns stay excluded.
     return { text: result.stdout, inputTokens: 0, outputTokens: 0 };
@@ -235,12 +222,5 @@ class LayaProvider implements ClosableProvider {
   }
 }
 
-export type {
-  LayaModel,
-  LayaOptions,
-  LayaPayload,
-  LayaQuestion,
-  PythonResult,
-  PythonRunner,
-};
+export type { LayaModel, LayaOptions, PythonResult, PythonRunner };
 export { defaultRunner, LAYA_MODELS, LAYA_SCRIPT, LayaProvider };
