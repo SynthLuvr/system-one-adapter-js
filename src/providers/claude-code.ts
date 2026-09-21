@@ -6,7 +6,7 @@ import {
   TypeSafeError,
 } from "@typesafe-ai/sdk";
 import { scope, type } from "arktype";
-import { translating } from "../utils/errorHandling.js";
+import { describeError, translating } from "../utils/errorHandling.js";
 import {
   type ClosableProvider,
   conversation,
@@ -172,7 +172,7 @@ const runCli = (
   new Promise((resolve, reject) => {
     const child = execFile(
       command,
-      [...args],
+      args,
       { env, timeout: timeoutMs, maxBuffer: MAX_BUFFER_BYTES },
       (error, stdout, stderr) => {
         if (error === null) resolve({ stdout, stderr });
@@ -205,36 +205,32 @@ const cliRunError = (
 const toProviderError = (error: unknown): TypeSafeError =>
   error instanceof TypeSafeError
     ? error
-    : new TypeSafeError(error instanceof Error ? error.message : String(error));
+    : new TypeSafeError(describeError(error));
 
-/** The environment the provider applies beyond the calling process. */
-interface ResolvedEnv {
-  /** Every override, with `undefined` marking variables to remove. */
-  merged: Record<string, string | undefined>;
-  /** The variables the provider sets, recorded on debug traces. */
+/** The environment one CLI process runs in, and what traces may record. */
+interface ResolvedEnvironment {
+  /** The child process environment. */
+  child: NodeJS.ProcessEnv;
+  /** The variables the provider set, recorded on debug traces. */
   applied: Record<string, string>;
 }
 
-/** Resolve the defaults plus caller overrides for one CLI process. */
-const resolveEnv = (
+/** Apply the defaults plus caller overrides over the calling process. */
+const resolveEnvironment = (
   overrides: Record<string, string | undefined>,
-): ResolvedEnv => {
-  const merged: Record<string, string | undefined> = {
+): ResolvedEnvironment => {
+  const child: NodeJS.ProcessEnv = { ...process.env };
+  const applied: Record<string, string> = {};
+  for (const [key, value] of Object.entries({
     ...DEFAULT_ENV,
     ...overrides,
-  };
-  const applied: Record<string, string> = {};
-  for (const [key, value] of Object.entries(merged))
-    if (value !== undefined) applied[key] = value;
-  return { merged, applied };
-};
-
-/** The child environment: applied values win, removed variables go. */
-const childEnvironment = (env: ResolvedEnv): NodeJS.ProcessEnv => {
-  const child: NodeJS.ProcessEnv = { ...process.env, ...env.applied };
-  for (const [key, value] of Object.entries(env.merged))
+  }))
     if (value === undefined) delete child[key];
-  return child;
+    else {
+      child[key] = value;
+      applied[key] = value;
+    }
+  return { child, applied };
 };
 
 /** Run evaluations through the Claude Code CLI in print mode. */
@@ -274,25 +270,20 @@ class ClaudeCodeProvider implements ClosableProvider {
         ...cliArgs(this.modelName, messages, options),
       ];
       const prompt = renderConversation(messages);
-      const env = resolveEnv(this.env);
+      const { child, applied } = resolveEnvironment(this.env);
       // Only the variables the provider sets are recorded: the inherited
       // environment may hold credentials that do not belong in traces.
       recordRequest(
-        { command: this.command, args, env: env.applied, prompt },
+        { command: this.command, args, env: applied, prompt },
         { api: "claude_code" },
       );
       let run: CliRun;
       try {
-        run = await runCli(
-          this.command,
-          args,
-          childEnvironment(env),
-          prompt,
-          this.timeoutMs,
-        );
+        run = await runCli(this.command, args, child, prompt, this.timeoutMs);
       } catch (error) {
-        if (!(error instanceof CliProcessError)) throw toProviderError(error);
-        throw cliRunError(error, this.timeoutMs);
+        if (error instanceof CliProcessError)
+          throw cliRunError(error, this.timeoutMs);
+        throw error;
       }
       return claudeCodeResult(run.stdout);
     }, toProviderError);
@@ -304,10 +295,4 @@ class ClaudeCodeProvider implements ClosableProvider {
   }
 }
 
-export {
-  ClaudeCodeProvider,
-  type ClaudeCodeProviderOptions,
-  claudeCodeResult,
-  cliArgs,
-  renderConversation,
-};
+export { ClaudeCodeProvider, type ClaudeCodeProviderOptions };

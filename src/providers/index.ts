@@ -6,16 +6,18 @@ import {
 } from "./claude-code.js";
 import { OpenAIProvider } from "./openai.js";
 
+/** The provider classes a model selector can name. */
+const providerClasses = {
+  openai: OpenAIProvider,
+  anthropic: AnthropicProvider,
+  claude_code: ClaudeCodeProvider,
+} as const;
+
 /** Build the provider named by a model selector. */
 const buildProvider = (
   provider: ProviderName,
   modelName: string,
-): ClosableProvider =>
-  provider === "openai"
-    ? new OpenAIProvider(modelName)
-    : provider === "anthropic"
-      ? new AnthropicProvider(modelName)
-      : new ClaudeCodeProvider(modelName);
+): ClosableProvider => new providerClasses[provider](modelName);
 
 export {
   captureAttempt,
