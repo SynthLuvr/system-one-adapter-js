@@ -55,18 +55,35 @@ const canImportLaya = (python: string): Promise<boolean> =>
       "sys.exit(0 if importlib.util.find_spec('laya') is not None else 1)",
   ]);
 
-/** Run the body with LAYA_PYTHON set, restoring the previous value after. */
+/** Run the body with the given environment overrides, restoring after. */
+const withEnv = (
+  overrides: Record<string, string>,
+  body: () => Promise<void>,
+): Promise<void> => {
+  const previous = Object.fromEntries(
+    Object.keys(overrides).map((key) => [key, process.env[key]]),
+  );
+  Object.assign(process.env, overrides);
+  return body().finally(() => {
+    for (const [key, value] of Object.entries(previous))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+  });
+};
+
+/** Run the body with LAYA_PYTHON set to the given interpreter. */
 const withLayaPython = (
   interpreter: string,
   body: () => Promise<void>,
-): Promise<void> => {
-  const previous = process.env.LAYA_PYTHON;
-  process.env.LAYA_PYTHON = interpreter;
-  return body().finally(() => {
-    if (previous === undefined) delete process.env.LAYA_PYTHON;
-    else process.env.LAYA_PYTHON = previous;
-  });
-};
+): Promise<void> => withEnv({ LAYA_PYTHON: interpreter }, body);
+
+/**
+ * Run the body in the environment of a non-UTF-8 host: C locale, no
+ * coercion, UTF-8 mode off — the codec situation a Windows `cp1252`
+ * machine presents to the spawned one-shot.
+ */
+const withNonUtf8Host = (body: () => Promise<void>): Promise<void> =>
+  withEnv({ LC_ALL: "C", PYTHONCOERCECLOCALE: "0", PYTHONUTF8: "0" }, body);
 
 /**
  * Interpreter hosting the real laya package: an explicit `LAYA_PYTHON`
@@ -96,6 +113,14 @@ const python = (): string => {
   if (layaPython === undefined)
     throw new Error(`no interpreter with the laya package: ${INSTALL_HINT}`);
   return layaPython;
+};
+
+/** Any interpreter a probe script can run on, laya host or bare system one. */
+const anyPython = async (): Promise<string> => {
+  if (layaPython !== undefined) return layaPython;
+  for (const interpreter of ["python3", "python"])
+    if (await exitsCleanly(interpreter, ["-c", "pass"])) return interpreter;
+  throw new Error("no python interpreter on PATH");
 };
 
 /** A client evaluating through the real laya engine at the given model. */
@@ -184,6 +209,27 @@ describe("LayaProvider", () => {
     );
     expect(result.code).toBe(-1);
     expect(result.stderr).toContain("adapter-no-such-python");
+  });
+
+  it("reads its UTF-8 payload even on non-UTF-8 hosts", async () => {
+    const text = "curly ” quotes — ünïcode";
+    const probe = [
+      "import json, sys",
+      "payload = json.load(sys.stdin)",
+      "report = {'encoding': sys.stdin.encoding, 'text': payload['text']}",
+      "print(json.dumps(report))",
+    ].join("\n");
+    await withNonUtf8Host(async () => {
+      const result = await defaultRunner(
+        await anyPython(),
+        probe,
+        JSON.stringify({ text }),
+      );
+      expect(result.code).toBe(0);
+      const report = JSON.parse(result.stdout);
+      expect(report.encoding.toLowerCase()).toBe("utf-8");
+      expect(report.text).toBe(text);
+    });
   });
 
   it("routes requests through the LAYA_PYTHON interpreter", async () => {
