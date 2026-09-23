@@ -55,18 +55,35 @@ const canImportLaya = (python: string): Promise<boolean> =>
       "sys.exit(0 if importlib.util.find_spec('laya') is not None else 1)",
   ]);
 
-/** Run the body with LAYA_PYTHON set, restoring the previous value after. */
+/** Run the body with the given environment overrides, restoring after. */
+const withEnv = (
+  overrides: Record<string, string>,
+  body: () => Promise<void>,
+): Promise<void> => {
+  const previous = Object.fromEntries(
+    Object.keys(overrides).map((key) => [key, process.env[key]]),
+  );
+  Object.assign(process.env, overrides);
+  return body().finally(() => {
+    for (const [key, value] of Object.entries(previous))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+  });
+};
+
+/** Run the body with LAYA_PYTHON set to the given interpreter. */
 const withLayaPython = (
   interpreter: string,
   body: () => Promise<void>,
-): Promise<void> => {
-  const previous = process.env.LAYA_PYTHON;
-  process.env.LAYA_PYTHON = interpreter;
-  return body().finally(() => {
-    if (previous === undefined) delete process.env.LAYA_PYTHON;
-    else process.env.LAYA_PYTHON = previous;
-  });
-};
+): Promise<void> => withEnv({ LAYA_PYTHON: interpreter }, body);
+
+/**
+ * Run the body in the environment of a non-UTF-8 host: C locale, no
+ * coercion, UTF-8 mode off — the codec situation a Windows `cp1252`
+ * machine presents to the spawned one-shot.
+ */
+const withNonUtf8Host = (body: () => Promise<void>): Promise<void> =>
+  withEnv({ LC_ALL: "C", PYTHONCOERCECLOCALE: "0", PYTHONUTF8: "0" }, body);
 
 /**
  * Interpreter hosting the real laya package: an explicit `LAYA_PYTHON`
@@ -96,29 +113,6 @@ const python = (): string => {
   if (layaPython === undefined)
     throw new Error(`no interpreter with the laya package: ${INSTALL_HINT}`);
   return layaPython;
-};
-
-/**
- * Run the body with python's UTF-8 mode disabled and the C locale forced
- * — the codec situation a Windows `cp1252` host presents to the spawned
- * one-shot (surrogateescape turns undecodable bytes into lone
- * surrogates there, `strict` raises here; either way the payload breaks).
- */
-const withNonUtf8Host = (body: () => Promise<void>): Promise<void> => {
-  const overrides: Record<string, string> = {
-    LC_ALL: "C",
-    PYTHONCOERCECLOCALE: "0",
-    PYTHONUTF8: "0",
-  };
-  const previous = Object.fromEntries(
-    Object.keys(overrides).map((key) => [key, process.env[key]]),
-  );
-  Object.assign(process.env, overrides);
-  return body().finally(() => {
-    for (const [key, value] of Object.entries(previous))
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-  });
 };
 
 /** Any interpreter a probe script can run on, laya host or bare system one. */
@@ -218,10 +212,6 @@ describe("LayaProvider", () => {
   });
 
   it("reads its UTF-8 payload even on non-UTF-8 hosts", async () => {
-    // The adapter pipes UTF-8 JSON to the child; python must decode it
-    // as UTF-8 even when its locale says otherwise — on Windows that is
-    // cp1252, where ” (U+201D) becomes a lone surrogate the engine
-    // rejects with a TextEncodeInput TypeError.
     const text = "curly ” quotes — ünïcode";
     const probe = [
       "import json, sys",

@@ -95,13 +95,10 @@ print(json.dumps({"answers": answers}))
 
 /**
  * Environment for one python one-shot: the calling process's variables
- * plus `PYTHONUTF8=1`. The adapter pipes UTF-8 JSON to the child, but
- * python only decodes piped stdin as UTF-8 when its locale says so — on
- * Windows the locale codec is `cp1252`, which turns `”` (U+201D) into a
- * lone surrogate the laya engine rejects. UTF-8 mode forces UTF-8
- * regardless of locale; inherited case-variants of the variable are
- * dropped first so Windows' case-insensitive environment never carries
- * two `PYTHONUTF8` entries.
+ * plus `PYTHONUTF8=1`, forcing UTF-8 regardless of locale — otherwise
+ * python decodes piped stdin with the locale codec (`cp1252` on
+ * Windows, mangling non-ASCII text). Case-variants of the variable are
+ * dropped first because Windows environments are case-insensitive.
  */
 const pythonEnv = (): NodeJS.ProcessEnv => {
   const env: Record<string, string> = {};

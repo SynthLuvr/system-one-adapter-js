@@ -142,15 +142,14 @@ const response = await client.systemOne({
 laya runs as a local python package (`pip install laya`); each request
 spawns one short-lived `python3` process (override with the
 `LAYA_PYTHON` environment variable or the `python` option) with
-`PYTHONUTF8=1` in its environment, so the UTF-8 question payload
-survives hosts whose default codec is not UTF-8 — Windows decodes
-python’s piped stdin as `cp1252`, mangling characters like `”`. The
-first run downloads the checkpoints from the Hugging Face hub. Because
-laya is a local encoder, token counts stay zero: latency is reported
-while cost columns stay excluded. Each provider request carries the
-validated questions in `ProviderRequestOptions.typed`, so laya evaluates
-the same typed questions an LLM provider is prompted with — including
-score questions, which laya answers natively.
+`PYTHONUTF8=1` forced: python otherwise decodes piped stdin with the
+locale codec, which on Windows is `cp1252` and mangles non-ASCII text
+like `”`. The first run downloads the checkpoints from the Hugging Face
+hub. Because laya is a local encoder, token counts stay zero: latency is
+reported while cost columns stay excluded. Each provider request carries
+the validated questions in `ProviderRequestOptions.typed`, so laya
+evaluates the same typed questions an LLM provider is prompted with —
+including score questions, which laya answers natively.
 
 ### Response
 
