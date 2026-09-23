@@ -1,12 +1,13 @@
 import { TypeSafeError } from "@typesafe-ai/sdk";
-import { Agent, type SystemAnswer } from "../laya-ts/agent.js";
-import type { SessionProvider } from "../laya-ts/providers.js";
 import {
+  Agent,
   DEFAULT_MODELS,
   type ModelName,
   type ModelSpec,
   Router,
-} from "../laya-ts/router.js";
+  type SessionProvider,
+  type SystemAnswer,
+} from "laya-ts";
 import {
   noulCriteriaNote,
   type Question,
@@ -37,8 +38,8 @@ type EngineModel = Exclude<LayaModel, "router">;
 
 /**
  * Where one checkpoint's exported ONNX bundle lives: a local directory
- * (exported with `scripts/export_onnx.py`) or a Hugging Face repo id,
- * optionally with a subfolder.
+ * (exported with the `laya-ts` package's `scripts/export_onnx.py`) or
+ * a Hugging Face repo id, optionally with a subfolder.
  */
 type LayaModelLocation = string | { repo: string; subfolder?: string | null };
 
@@ -142,8 +143,9 @@ const shapeAnswers = (
 
 /**
  * Provider running the local laya decision engine
- * (github.com/NandhaKishorM/laya) in-process through the vendored
- * `laya-ts` port (`src/laya-ts`): a BPE tokenizer, a pure string
+ * (github.com/NandhaKishorM/laya) in-process through the `laya-ts`
+ * package, installed from the SynthLuvr/laya fork that compiles the
+ * upstream TypeScript port: a BPE tokenizer, a pure string
  * sequence builder, and ONNX Runtime sessions over the exported
  * `encoder.onnx` + `head.onnx` weights. laya answers the adapter's typed
  * questions natively — choice, score, and noul — so no text generation
@@ -226,8 +228,8 @@ class LayaProvider implements ClosableProvider {
     return new TypeSafeError(
       `the laya ${JSON.stringify(model)} checkpoint failed to load: ` +
         `${describeError(error)}; export its ONNX weights once with ` +
-        "scripts/export_onnx.py, or point the `models` option or " +
-        "LAYA_MODEL_DIR at an exported bundle",
+        "the laya-ts package's scripts/export_onnx.py, or point the " +
+        "`models` option or LAYA_MODEL_DIR at an exported bundle",
     );
   }
 

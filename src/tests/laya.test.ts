@@ -2,11 +2,16 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { choice, noul, score } from "@typesafe-ai/sdk";
+import {
+  Agent,
+  type Batch,
+  type ModelName,
+  Router,
+  type SessionProvider,
+  VERSION,
+} from "laya-ts";
 import { describe, expect, it } from "vitest";
 import { SystemOneAdapterClient } from "../client.js";
-import { Agent, Router, VERSION } from "../laya-ts/index.js";
-import type { Batch, SessionProvider } from "../laya-ts/providers.js";
-import type { ModelName } from "../laya-ts/router.js";
 import {
   LAYA_MODELS,
   type LayaModel,
@@ -14,8 +19,8 @@ import {
 } from "../providers/laya.js";
 
 /**
- * The engine under test is the vendored laya-ts port (`src/laya-ts`) driven
- * by a deterministic fake ONNX session, so these tests exercise the full
+ * The engine under test is the `laya-ts` dependency, driven by a
+ * deterministic fake ONNX session, so these tests exercise the full
  * provider path — question building, batching, answer shaping, routing —
  * without weights. The suite never reaches the network: msw fails any
  * unintended request, which also proves the fake path never tries to fetch
@@ -281,7 +286,7 @@ describe("LayaProvider against the in-process engine", () => {
 
 describe("routing", () => {
   it("sends english text to the english checkpoint and latin non-english to multilingual", async () => {
-    // The wrapper delegates language detection to the vendored Router; this
+    // The wrapper delegates language detection to laya's Router; this
     // pins the routing contract its loader relies on.
     const loaded: ModelName[] = [];
     const router = new Router({
@@ -304,11 +309,11 @@ describe("routing", () => {
   });
 });
 
-describe("vendored laya-ts", () => {
+describe("the laya-ts package", () => {
   it("keeps the full public surface importable", async () => {
-    // Importing the package entry executes every vendored module, guarding
-    // the arrow-const conversion against initialization-order breakage.
-    const layaTs = await import("../laya-ts/index.js");
+    // Importing the package entry executes every module the fork ships,
+    // guarding the compiled dist against a broken build.
+    const layaTs = await import("laya-ts");
     expect(layaTs.VERSION).toBe(VERSION);
     expect(Agent).toBeTypeOf("function");
     expect(Router).toBeTypeOf("function");

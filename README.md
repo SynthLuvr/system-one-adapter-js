@@ -116,10 +116,13 @@ For evaluations that need no text generation at all, the adapter ships a
 provider for [laya](https://github.com/NandhaKishorM/laya), a local
 System 1 decision engine that answers typed questions (`choice`,
 `score`, `noul`) with calibrated probabilities in a single forward pass.
-The engine runs fully in-process: the adapter embeds the upstream
-[`laya-ts`](https://github.com/NandhaKishorM/laya/tree/main/laya-ts)
-TypeScript port (vendored under `src/laya-ts`), which tokenizes, builds
-the question sequence, and runs the exported ONNX weights through
+The engine runs fully in-process: the adapter depends on
+[`laya-ts`](https://github.com/SynthLuvr/laya/tree/laya-ts-v0.1.0/laya-ts),
+the upstream TypeScript port, installed as a GitHub dependency from the
+[SynthLuvr/laya](https://github.com/SynthLuvr/laya) fork — which commits
+the compiled `dist/` — because upstream has not published the package to
+npm. It tokenizes, builds the question sequence, and runs the exported
+ONNX weights through
 [onnxruntime-node](https://www.npmjs.com/package/onnxruntime-node) — no
 python involved:
 
@@ -138,13 +141,14 @@ alongside the adapter.
 
 Because the engine reads exported ONNX weights rather than the
 checkpoints’ safetensors, the weights must be exported once per
-checkpoint with the bundled script (requires a one-time python
-environment with `pip install laya torch`):
+checkpoint with the export script shipped inside the installed `laya-ts`
+package (requires a one-time python environment with
+`pip install laya torch`):
 
 ``` bash
-python scripts/export_onnx.py --repo convaiinnovations/laya --out-dir ./models/english
-python scripts/export_onnx.py --repo convaiinnovations/laya --subfolder multilingual --out-dir ./models/multilingual
-python scripts/export_onnx.py --repo convaiinnovations/laya --subfolder typed-decisions --out-dir ./models/typed-decisions
+python node_modules/laya-ts/scripts/export_onnx.py --repo convaiinnovations/laya --out-dir ./models/english
+python node_modules/laya-ts/scripts/export_onnx.py --repo convaiinnovations/laya --subfolder multilingual --out-dir ./models/multilingual
+python node_modules/laya-ts/scripts/export_onnx.py --repo convaiinnovations/laya --subfolder typed-decisions --out-dir ./models/typed-decisions
 ```
 
 Point the provider at the exported tree with `LAYA_MODEL_DIR` (one
@@ -260,8 +264,8 @@ retries, and the debug traces are verified end to end. Unhandled
 requests are rejected, so a test that triggers unintended network
 traffic fails.
 
-The laya tests drive the vendored laya-ts engine through a deterministic
-fake ONNX session, so they exercise the full provider path — question
+The laya tests drive the laya-ts package through a deterministic fake
+ONNX session, so they exercise the full provider path — question
 building, batching, answer shaping, language routing — without weights,
 and never touch the network. To run the engine on real exported weights,
 export the checkpoints as shown above and set `LAYA_MODEL_DIR`; the
