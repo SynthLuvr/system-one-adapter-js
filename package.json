@@ -46,10 +46,19 @@
     "arktype": "^2.2.3",
     "openai": "^7.20.0"
   },
+  "peerDependencies": {
+    "onnxruntime-node": "^1.20.0"
+  },
+  "peerDependenciesMeta": {
+    "onnxruntime-node": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@types/node": "^26.4.1",
     "@vitest/coverage-v8": "^5.0.0",
     "msw": "^2.15.0",
+    "onnxruntime-node": "^1.20.0",
     "ts-canon": "^0.1.5",
     "type-a-bin": "^0.1.7",
     "typescript": "^7.0.2",

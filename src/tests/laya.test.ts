@@ -1,147 +1,75 @@
-import { spawn } from "node:child_process";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { choice, noul, score } from "@typesafe-ai/sdk";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { SystemOneAdapterClient } from "../client.js";
+import { Agent, Router, VERSION } from "../laya-ts/index.js";
+import type { Batch, SessionProvider } from "../laya-ts/providers.js";
+import type { ModelName } from "../laya-ts/router.js";
 import {
-  defaultRunner,
   LAYA_MODELS,
-  LAYA_SCRIPT,
   type LayaModel,
   LayaProvider,
 } from "../providers/laya.js";
 
 /**
- * Every evaluation in this file runs the real laya engine: the provider's
- * embedded python script is spawned for real and answers with the actual
- * `convaiinnovations/laya` checkpoints (downloaded from the Hugging Face
- * hub on first use). Nothing is stubbed, faked, or intercepted.
+ * The engine under test is the vendored laya-ts port (`src/laya-ts`) driven
+ * by a deterministic fake ONNX session, so these tests exercise the full
+ * provider path — question building, batching, answer shaping, routing —
+ * without weights. The suite never reaches the network: msw fails any
+ * unintended request, which also proves the fake path never tries to fetch
+ * checkpoints.
  */
 
-/** Per-test ceiling sized for a cold Hugging Face checkpoint download. */
-const MODEL_TIMEOUT = 600_000;
+/** Log-probability logits; softmax recovers the given probabilities. */
+const logitsFor = (probabilities: number[]): number[] =>
+  probabilities.map((p) => Math.log(p));
 
-/** The repo-local venv directory the laya package is installed into. */
-const VENV_DIR = join(process.cwd(), "node_modules", ".cache", "laya-venv");
+/** Deterministic ONNX session: label 0 wins, mid score, 70% noul. */
+const fakeSession = (): SessionProvider => ({
+  runEncoder: async (batch: Batch) => ({
+    lastHidden: batch.inputIds.map((row) =>
+      row.map(() => [0.5, 0.5, 0.5, 0.5]),
+    ),
+  }),
+  runHead: async (
+    _hidden: unknown,
+    batch: Batch,
+  ): Promise<{
+    logits: number[][];
+    act: number[][];
+  }> => ({
+    logits: batch.qtype.map((qtype, r) => {
+      // The item's true option count: markerPos is padded to the batch
+      // maximum, so the marker mask carries the real length.
+      const k = batch.markerMask[r].filter(Boolean).length;
+      if (qtype === 0)
+        return Array.from({ length: k }, (_, i) => (i === 0 ? 2 : 0));
+      if (qtype === 1) {
+        // Two even levels give an exact 0.5 expectation; three levels a
+        // [0.25, 0.5, 0.25] distribution with an exact expectation of 1.
+        const probabilities =
+          k === 2 ? [0.5, 0.5] : [0.25, 0.5, 0.25].slice(0, k);
+        return logitsFor(probabilities);
+      }
+      return logitsFor([0.3, 0.7]);
+    }),
+    act: batch.qtype.map(() => [2, 1]),
+  }),
+});
 
-/** The venv interpreter; POSIX and Windows lay it out differently. */
-const VENV_PYTHON =
-  process.platform === "win32"
-    ? join(VENV_DIR, "Scripts", "python.exe")
-    : join(VENV_DIR, "bin", "python");
-
-/** Resolve `true` when the given path exists. */
-const fileExists = (path: string): Promise<boolean> =>
-  stat(path).then(
-    () => true,
-    () => false,
-  );
-
-/** Whether the interpreter exits cleanly on the given arguments. */
-const exitsCleanly = (python: string, args: string[]): Promise<boolean> =>
-  new Promise((resolve) => {
-    const child = spawn(python, args);
-    child.on("error", () => resolve(false));
-    child.on("close", (code) => resolve(code === 0));
-  });
-
-/** Resolve whether the given interpreter has the laya package importable. */
-const canImportLaya = (python: string): Promise<boolean> =>
-  exitsCleanly(python, [
-    "-c",
-    "import importlib.util, sys; " +
-      "sys.exit(0 if importlib.util.find_spec('laya') is not None else 1)",
-  ]);
-
-/** Run the body with the given environment overrides, restoring after. */
-const withEnv = (
-  overrides: Record<string, string>,
-  body: () => Promise<void>,
-): Promise<void> => {
-  const previous = Object.fromEntries(
-    Object.keys(overrides).map((key) => [key, process.env[key]]),
-  );
-  Object.assign(process.env, overrides);
-  return body().finally(() => {
-    for (const [key, value] of Object.entries(previous))
-      if (value === undefined) delete process.env[key];
-      else process.env[key] = value;
-  });
-};
-
-/** Run the body with LAYA_PYTHON set to the given interpreter. */
-const withLayaPython = (
-  interpreter: string,
-  body: () => Promise<void>,
-): Promise<void> => withEnv({ LAYA_PYTHON: interpreter }, body);
-
-/**
- * Run the body in the environment of a non-UTF-8 host: C locale, no
- * coercion, UTF-8 mode off — the codec situation a Windows `cp1252`
- * machine presents to the spawned one-shot.
- */
-const withNonUtf8Host = (body: () => Promise<void>): Promise<void> =>
-  withEnv({ LC_ALL: "C", PYTHONCOERCECLOCALE: "0", PYTHONUTF8: "0" }, body);
-
-/**
- * Interpreter hosting the real laya package: an explicit `LAYA_PYTHON`
- * wins, then the repo-local venv under `node_modules/.cache` (invisible
- * to git and the repo tooling), then any `python3` or `python` on PATH.
- */
-const resolveLayaPython = async (): Promise<string | undefined> => {
-  if (process.env.LAYA_PYTHON !== undefined) return process.env.LAYA_PYTHON;
-  if ((await fileExists(VENV_PYTHON)) && (await canImportLaya(VENV_PYTHON)))
-    return VENV_PYTHON;
-  if (await canImportLaya("python3")) return "python3";
-  if (await canImportLaya("python")) return "python";
-  return undefined;
-};
-
-const layaPython = await resolveLayaPython();
-
-/** How to obtain an interpreter hosting the laya package. */
-const INSTALL_HINT =
-  "install one with `uv venv node_modules/.cache/laya-venv && " +
-  "uv pip install --python node_modules/.cache/laya-venv laya " +
-  "--torch-backend=cpu` (or `pip install laya`), or point LAYA_PYTHON " +
-  "at an interpreter that has it";
-
-/** The resolved interpreter; engine tests fail fast when it is missing. */
-const python = (): string => {
-  if (layaPython === undefined)
-    throw new Error(`no interpreter with the laya package: ${INSTALL_HINT}`);
-  return layaPython;
-};
-
-/** Any interpreter a probe script can run on, laya host or bare system one. */
-const anyPython = async (): Promise<string> => {
-  if (layaPython !== undefined) return layaPython;
-  for (const interpreter of ["python3", "python"])
-    if (await exitsCleanly(interpreter, ["-c", "pass"])) return interpreter;
-  throw new Error("no python interpreter on PATH");
-};
-
-/** A client evaluating through the real laya engine at the given model. */
+/** A client evaluating through the fake session at the given model. */
 const client = (
   model: LayaModel,
   llmAnswerMode: "probabilities" | "discrete" = "probabilities",
+  session: SessionProvider = fakeSession(),
 ): SystemOneAdapterClient =>
   new SystemOneAdapterClient({
     structuredOutputs: true,
     llmAnswerMode,
     normalizeProbabilities: true,
-    model: new LayaProvider(model, { python: python() }),
-  });
-
-/** A client resolving `provider: "laya"` through the provider registry. */
-const builtInClient = (): SystemOneAdapterClient =>
-  new SystemOneAdapterClient({
-    structuredOutputs: true,
-    llmAnswerMode: "probabilities",
-    provider: "laya",
-    model: "router",
+    model: new LayaProvider(model, { session }),
   });
 
 const QUESTIONS = {
@@ -178,6 +106,22 @@ const expectDistribution = (
   expect(Math.abs(sum - 1)).toBeLessThan(0.01);
 };
 
+/** Run the body with the given environment overrides, restoring after. */
+const withEnv = (
+  overrides: Record<string, string>,
+  body: () => Promise<void>,
+): Promise<void> => {
+  const previous = Object.fromEntries(
+    Object.keys(overrides).map((key) => [key, process.env[key]]),
+  );
+  Object.assign(process.env, overrides);
+  return body().finally(() => {
+    for (const [key, value] of Object.entries(previous))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+  });
+};
+
 describe("LayaProvider", () => {
   it("rejects unknown laya models", () => {
     expect(() => new LayaProvider("flash" as LayaModel)).toThrow(
@@ -186,7 +130,7 @@ describe("LayaProvider", () => {
   });
 
   it("rejects requests without typed questions", async () => {
-    const provider = new LayaProvider("router");
+    const provider = new LayaProvider("router", { session: fakeSession() });
     await expect(
       provider.request([{ role: "user", content: "unused" }], {
         schema: {},
@@ -201,55 +145,61 @@ describe("LayaProvider", () => {
     expect(provider.translateError("raw").message).toBe("raw");
   });
 
-  it("reports spawn failures through the default runner", async () => {
-    const result = await defaultRunner(
-      "adapter-no-such-python",
-      LAYA_SCRIPT,
-      "{}",
-    );
-    expect(result.code).toBe(-1);
-    expect(result.stderr).toContain("adapter-no-such-python");
-  });
-
-  it("reads its UTF-8 payload even on non-UTF-8 hosts", async () => {
-    const text = "curly ” quotes — ünïcode";
-    const probe = [
-      "import json, sys",
-      "payload = json.load(sys.stdin)",
-      "report = {'encoding': sys.stdin.encoding, 'text': payload['text']}",
-      "print(json.dumps(report))",
-    ].join("\n");
-    await withNonUtf8Host(async () => {
-      const result = await defaultRunner(
-        await anyPython(),
-        probe,
-        JSON.stringify({ text }),
-      );
-      expect(result.code).toBe(0);
-      const report = JSON.parse(result.stdout);
-      expect(report.encoding.toLowerCase()).toBe("utf-8");
-      expect(report.text).toBe(text);
-    });
-  });
-
-  it("routes requests through the LAYA_PYTHON interpreter", async () => {
-    await withLayaPython("adapter-no-such-laya-python", async () => {
-      const adapter = builtInClient();
+  it("surfaces a missing ONNX export with recovery guidance", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "adapter-laya-empty-"));
+    try {
+      const provider = new LayaProvider("english", {
+        models: { english: dir },
+      });
       await expect(
-        adapter.systemOne({
-          state: { body: "x" },
-          questions: { positive: noul("Good?") },
+        provider.request([{ role: "user", content: "unused" }], {
+          schema: {},
+          structured: true,
+          typed: {
+            state: { body: "x" },
+            questions: { positive: noul("Good?") },
+            answerMode: "probabilities",
+          },
         }),
-      ).rejects.toThrow(/adapter-no-such-laya-python/u);
-      await adapter.close();
-    });
+      ).rejects.toThrow(/failed to load.*export_onnx/su);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves LAYA_MODEL_DIR to one exported bundle per checkpoint", async () => {
+    const base = await mkdtemp(join(tmpdir(), "adapter-laya-dir-"));
+    try {
+      await mkdir(join(base, "english"), { recursive: true });
+      await withEnv({ LAYA_MODEL_DIR: base }, async () => {
+        // The constructor reads LAYA_MODEL_DIR, so it lives inside the
+        // override: without the variable, the checkpoint would resolve to
+        // the default Hugging Face locations instead of the local tree.
+        const provider = new LayaProvider("english");
+        await expect(
+          provider.request([{ role: "user", content: "unused" }], {
+            schema: {},
+            structured: true,
+            typed: {
+              state: { body: "x" },
+              questions: { positive: noul("Good?") },
+              answerMode: "probabilities",
+            },
+          }),
+        ).rejects.toThrow(join(base, "english"));
+      });
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
   });
 });
 
-describe("LayaProvider against the real laya engine", () => {
-  it("evaluates typed questions with calibrated probabilities", {
-    timeout: MODEL_TIMEOUT,
-  }, async () => {
+describe("LayaProvider against the in-process engine", () => {
+  afterEach(async () => {
+    delete process.env.LAYA_MODEL_DIR;
+  });
+
+  it("evaluates typed questions through the routing engine", async () => {
     const adapter = client("router");
     const response = await adapter.systemOne({
       state: { user_message: "hi", assistant_1: "a", assistant_2: "b" },
@@ -264,7 +214,8 @@ describe("LayaProvider against the real laya engine", () => {
     expect(response.usage.latency).toBeGreaterThan(0);
 
     const verdict = response.choices.verdict;
-    expect(["A", "B", "tie"]).toContain(verdict?.choice);
+    // The fake head's logits always peak at the first label.
+    expect(verdict?.choice).toBe("A");
     expect(Object.keys(verdict?.probabilities ?? {}).sort()).toEqual([
       "A",
       "B",
@@ -282,7 +233,7 @@ describe("LayaProvider against the real laya engine", () => {
     expectUnitInterval(verdict?.confidence);
 
     const isSafe = response.nouls.is_safe;
-    expectUnitInterval(isSafe?.noul);
+    expect(isSafe?.noul).toBe(0.7);
 
     const rating = response.scores.rating;
     expect(rating?.legend).toEqual({
@@ -290,34 +241,28 @@ describe("LayaProvider against the real laya engine", () => {
       1: "Somewhat helpful",
       2: "Very helpful",
     });
-    expect(Object.keys(rating?.probabilities ?? {}).sort()).toEqual([
-      "0",
-      "1",
-      "2",
-    ]);
-    expectDistribution(rating?.probabilities);
+    expect(rating?.probabilities).toEqual({ 0: 0.25, 1: 0.5, 2: 0.25 });
     // The reported score is the expected value over that distribution.
-    const expected = (["0", "1", "2"] as const).reduce(
-      (total, level) =>
-        total + Number(level) * (rating?.probabilities?.[level] ?? 0),
-      0,
-    );
-    expect(Math.abs((rating?.score ?? -1) - expected)).toBeLessThan(0.01);
+    expect(rating?.score).toBe(1);
     expectUnitInterval(rating?.confidence);
   });
 
-  it("maps discrete answers: labels, booleans, rounded scores", {
-    timeout: MODEL_TIMEOUT,
-  }, async () => {
+  it("maps discrete answers: labels, booleans, and python-rounded levels", async () => {
+    // The two-level score's exact 0.5 expectation discriminates python's
+    // round-half-to-even (level 0) from javascript's half-up (level 1).
     const adapter = client("english", "discrete");
     const response = await adapter.systemOne({
       state: { body: "A thoughtful and complete answer." },
-      questions: QUESTIONS,
+      questions: {
+        verdict: QUESTIONS.verdict,
+        is_safe: QUESTIONS.is_safe,
+        rating: score("How helpful is the response?", ["Unhelpful", "Helpful"]),
+      },
     });
     await adapter.close();
 
     const verdict = response.choices.verdict;
-    expect(["A", "B", "tie"]).toContain(verdict?.choice);
+    expect(verdict?.choice).toBe("A");
     // A discrete answer carries all its probability on the chosen label.
     for (const label of ["A", "B", "tie"] as const)
       expect(verdict?.probabilities?.[label]).toBe(
@@ -328,101 +273,70 @@ describe("LayaProvider against the real laya engine", () => {
 
     const rating = response.scores.rating;
     expect(Number.isInteger(rating?.score)).toBe(true);
-    expect(rating?.score).toBeGreaterThanOrEqual(0);
-    expect(rating?.score).toBeLessThanOrEqual(2);
-    expect(Object.keys(rating?.probabilities ?? {}).sort()).toEqual([
-      "0",
-      "1",
-      "2",
-    ]);
-    const level = String(rating?.score);
-    expect(rating?.probabilities?.[0]).toBe(level === "0" ? 1 : 0);
-    expect(rating?.probabilities?.[1]).toBe(level === "1" ? 1 : 0);
-    expect(rating?.probabilities?.[2]).toBe(level === "2" ? 1 : 0);
-    expect(rating?.legend).toEqual({
-      0: "Unhelpful",
-      1: "Somewhat helpful",
-      2: "Very helpful",
-    });
+    expect(rating?.score).toBe(0);
+    expect(rating?.legend).toEqual({ 0: "Unhelpful", 1: "Helpful" });
+    expect(rating?.probabilities?.[0]).toBe(1);
+    expect(rating?.probabilities?.[1]).toBe(0);
   });
 
-  it("loads the multilingual checkpoint with its subfolder", {
-    timeout: MODEL_TIMEOUT,
-  }, async () => {
-    const adapter = client("multilingual");
-    const response = await adapter.systemOne({
-      state: { body: "Mein Konto wurde zweimal belastet" },
-      questions: { urgent: noul("Urgent?") },
-    });
-    await adapter.close();
-
-    expect(response.model).toBe("laya/multilingual");
-    expectUnitInterval(response.nouls.urgent?.noul);
-  });
-
-  it("runs the built-in provider through the LAYA_PYTHON interpreter", {
-    timeout: MODEL_TIMEOUT,
-  }, async () => {
-    await withLayaPython(python(), async () => {
-      const adapter = builtInClient();
-      const response = await adapter.systemOne({
-        state: { body: "A thoughtful and complete answer." },
-        questions: { positive: noul("The answer is helpful.") },
-      });
-      await adapter.close();
-
-      expect(response.model).toBe("laya/router");
-      expectUnitInterval(response.nouls.positive?.noul);
-    });
+  it("drops cached agents on close and still serves later requests", async () => {
+    const provider = new LayaProvider("english", { session: fakeSession() });
+    const options = {
+      schema: {},
+      structured: true,
+      typed: {
+        state: { body: "x" },
+        questions: { positive: noul("Good?") },
+        answerMode: "probabilities" as const,
+      },
+    };
+    const first = await provider.request(
+      [{ role: "user", content: "unused" }],
+      options,
+    );
+    provider.close();
+    const second = await provider.request(
+      [{ role: "user", content: "unused" }],
+      options,
+    );
+    expect(JSON.parse(second.text)).toEqual(JSON.parse(first.text));
   });
 });
 
-describe("a missing laya install", () => {
-  // A freshly created venv has no packages, so its interpreter always
-  // reproduces the real ModuleNotFoundError a machine without laya sees.
-  let bareVenvDir: string | undefined;
-  let barePython: string | undefined;
-
-  const discard = async (): Promise<void> => {
-    if (bareVenvDir === undefined) return;
-    await rm(bareVenvDir, { recursive: true, force: true });
-    bareVenvDir = undefined;
-    barePython = undefined;
-  };
-
-  beforeAll(async () => {
-    const dir = await mkdtemp(join(tmpdir(), "adapter-laya-bare-"));
-    bareVenvDir = dir;
-    // `python3` is the POSIX name; `python` is the usual one on Windows.
-    for (const interpreter of ["python3", "python"]) {
-      if (
-        !(await exitsCleanly(interpreter, ["-m", "venv", "--without-pip", dir]))
-      )
-        continue;
-      barePython =
-        process.platform === "win32"
-          ? join(bareVenvDir, "Scripts", "python.exe")
-          : join(bareVenvDir, "bin", "python");
-      return;
-    }
-    await discard();
-  }, 60_000);
-
-  afterAll(async () => {
-    await discard();
-  });
-
-  it("surfaces the python failure through the built-in provider", async () => {
-    // Never skipped: a machine that cannot even build the bare venv is
-    // broken in a way the suite must report, not paper over.
-    if (barePython === undefined)
-      throw new Error("could not create a bare venv without the laya package");
-    await withLayaPython(barePython, async () => {
-      const adapter = builtInClient();
-      await expect(
-        adapter.systemOne({ state: { body: "x" }, questions: QUESTIONS }),
-      ).rejects.toThrow(/laya python process exited.*No module named 'laya'/u);
-      await adapter.close();
+describe("routing", () => {
+  it("sends english text to the english checkpoint and latin non-english to multilingual", async () => {
+    // The wrapper delegates language detection to the vendored Router; this
+    // pins the routing contract its loader relies on.
+    const loaded: ModelName[] = [];
+    const router = new Router({
+      loader: async (name: ModelName) => {
+        loaded.push(name);
+        return new Agent({ provider: fakeSession() });
+      },
     });
+    await router.predict(
+      {
+        body: "Der Kunde möchte seine Bestellung stornieren und das Geld zurück",
+      },
+      { urgent: { type: "noul", instructions: "Urgent?" } },
+    );
+    await router.predict(
+      { body: "please refund my order" },
+      { urgent: { type: "noul", instructions: "Urgent?" } },
+    );
+    expect(loaded).toEqual(["multilingual", "english"]);
+  });
+});
+
+describe("vendored laya-ts", () => {
+  it("keeps the full public surface importable", async () => {
+    // Importing the package entry executes every vendored module, guarding
+    // the arrow-const conversion against initialization-order breakage.
+    const layaTs = await import("../laya-ts/index.js");
+    expect(layaTs.VERSION).toBe(VERSION);
+    expect(Agent).toBeTypeOf("function");
+    expect(Router).toBeTypeOf("function");
+    expect(layaTs.buildSequence).toBeTypeOf("function");
+    expect(layaTs.bpeEncode).toBeTypeOf("function");
   });
 });

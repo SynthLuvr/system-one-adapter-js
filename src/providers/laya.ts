@@ -1,5 +1,11 @@
-import { spawn } from "node:child_process";
 import { TypeSafeError } from "@typesafe-ai/sdk";
+import {
+  Agent,
+  type QuestionDef,
+  type SystemAnswer,
+} from "../laya-ts/agent.js";
+import type { SessionProvider } from "../laya-ts/providers.js";
+import { type ModelName, Router } from "../laya-ts/router.js";
 import {
   noulCriteriaNote,
   type Question,
@@ -21,132 +27,91 @@ const LAYA_MODELS = [
   "typed-decisions",
 ] as const;
 
-/** One laya checkpoint name. */
+/** One laya provider model: the router or a named checkpoint. */
 type LayaModel = (typeof LAYA_MODELS)[number];
+
+/** The laya-ts checkpoints an engine can be built from (all but `router`). */
+type EngineModel = Exclude<LayaModel, "router">;
+
+/** The default checkpoint bundle all three engines come from. */
+const DEFAULT_REPO = "convaiinnovations/laya";
+
+/**
+ * Default checkpoint locations, mirroring the official Hugging Face
+ * bundle's layout: `english` at the root and the other two in subfolders.
+ */
+const DEFAULT_LOCATIONS: Record<
+  EngineModel,
+  { repo: string; subfolder: string | null }
+> = {
+  english: { repo: DEFAULT_REPO, subfolder: null },
+  multilingual: { repo: DEFAULT_REPO, subfolder: "multilingual" },
+  "typed-decisions": { repo: DEFAULT_REPO, subfolder: "typed-decisions" },
+};
+
+/**
+ * Where one checkpoint's exported ONNX bundle lives: either a single
+ * location (a local directory exported with `scripts/export_onnx.py`, or
+ * a Hugging Face repo id hosting the ONNX files), or an explicit repo id
+ * with subfolder.
+ */
+type LayaModelLocation = string | { repo: string; subfolder?: string | null };
 
 /** Options for constructing a laya provider. */
 interface LayaOptions {
-  /** Python interpreter hosting the laya package; default `python3`. */
-  python?: string;
+  /**
+   * Checkpoint location overrides, keyed by engine model name; defaults
+   * to the official `convaiinnovations/laya` bundle layout, which does
+   * not ship ONNX exports yet.
+   */
+  models?: Partial<Record<EngineModel, LayaModelLocation>>;
+  /** ONNX Runtime device; `"cpu"` (default) or `"cuda"` with CPU fallback. */
+  device?: "cpu" | "cuda";
+  /** ONNX Runtime intra-op thread count. */
+  numThreads?: number;
+  /**
+   * Prebuilt ONNX session shim replacing engine loading entirely, for
+   * tests and custom runtimes; agents built this way use laya's default
+   * tokenizer and configuration.
+   */
+  session?: SessionProvider;
 }
 
-/** Result of one python one-shot invocation. */
-interface PythonResult {
-  stdout: string;
-  stderr: string;
-  code: number;
-}
+/** One adapter answer after engine shaping. */
+type AdapterAnswer = boolean | number | string | Record<string, number>;
 
-/**
- * Runs a python script with stdin, resolving even when the process cannot
- * spawn (exit code -1) — failures surface through the validated result.
- */
-type PythonRunner = (
-  python: string,
-  script: string,
-  stdin: string,
-) => Promise<PythonResult>;
-
-/** One laya question in the python package's native format. */
+/** One laya question in the engine's native question definition shape. */
 type LayaQuestion =
   | { type: "choice"; instructions: string; criteria: Record<string, string> }
   | { type: "score"; instructions: string; criteria: string[] }
   | { type: "noul"; instructions: string };
 
-/**
- * One-shot python script: read {model, mode, state, questions} from stdin,
- * run the laya engine, print adapter-shaped answers to stdout.
- */
-const LAYA_SCRIPT = `
-import json, sys
+/** The resolved engine inputs for one provider model. */
+interface ResolvedModel {
+  /** Repo id or local directory passed to `Agent.load`. */
+  source: string;
+  /** Subfolder inside the source bundle, when the source is a repo. */
+  subfolder: string | null;
+}
 
-payload = json.load(sys.stdin)
-model = payload["model"]
-mode = payload["mode"]
-state = payload["state"]
-questions = payload["questions"]
-
-if model == "router":
-    from laya import Router
-    engine = Router().predict
-else:
-    import laya
-    subfolder = None if model == "english" else model
-    engine = laya.load("convaiinnovations/laya", subfolder=subfolder).predict
-result = engine(state, questions)
-
-answers = {}
-for question_id, question in questions.items():
-    answer = result["answers"][question_id]
-    if question["type"] == "noul":
-        answers[question_id] = (
-            bool(answer["noul"] >= 0.5) if mode == "discrete"
-            else float(answer["noul"])
-        )
-    elif mode == "discrete":
-        if question["type"] == "score":
-            answers[question_id] = int(round(float(answer["score"])))
-        else:
-            answers[question_id] = answer["choice"]
-    else:
-        answers[question_id] = answer.get("probabilities", {})
-print(json.dumps({"answers": answers}))
-`;
+/** The state an engine call carries: text or a JSON-serializable object. */
+type EngineCall = (
+  state: unknown,
+  questions: Record<string, QuestionDef>,
+) => Promise<{ answers: Record<string, SystemAnswer> }>;
 
 /**
- * Environment for one python one-shot: the calling process's variables
- * plus `PYTHONUTF8=1`, forcing UTF-8 regardless of locale — otherwise
- * python decodes piped stdin with the locale codec (`cp1252` on
- * Windows, mangling non-ASCII text). Case-variants of the variable are
- * dropped first because Windows environments are case-insensitive.
+ * Round half to even, matching python's `round`: the old laya provider
+ * discretized score answers with `int(round(score))`, and expectations
+ * landing exactly on `.5` must keep rounding to the neighboring even
+ * level instead of javascript's half-up.
  */
-const pythonEnv = (): NodeJS.ProcessEnv => {
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env))
-    if (key.toLowerCase() !== "pythonutf8" && value !== undefined)
-      env[key] = value;
-  env.PYTHONUTF8 = "1";
-  return env;
-};
-
-/** Spawn the python one-shot process and collect its output. */
-const defaultRunner: PythonRunner = (python, script, stdin) =>
-  new Promise((resolve) => {
-    const child = spawn(python, ["-c", script], { env: pythonEnv() });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.stderr.on("data", (chunk: string) => {
-      stderr += chunk;
-    });
-    child.on("error", (error) =>
-      resolve({ stdout: "", stderr: `${error.message}\n${stderr}`, code: -1 }),
-    );
-    child.on("close", (code) => resolve({ stdout, stderr, code: code ?? -1 }));
-    // Python may exit before draining stdin; the EPIPE it raises is noise.
-    child.stdin.on("error", () => undefined);
-    child.stdin.end(stdin, "utf8");
-  });
-
-/** Reject a failed python run or stdout that is not JSON. */
-const validatePythonResult = (result: PythonResult): void => {
-  if (result.code !== 0) {
-    const detail = result.stderr.trim().split("\n").slice(-4).join(" | ");
-    throw new TypeSafeError(
-      `laya python process exited ${result.code}: ${detail}`,
-    );
-  }
-  try {
-    JSON.parse(result.stdout);
-  } catch (error) {
-    throw new TypeSafeError(
-      `laya python process printed invalid JSON: ${describeError(error)}`,
-    );
-  }
+const roundHalfEven = (value: number): number => {
+  const floor = Math.floor(value);
+  const diff = value - floor;
+  if (diff > 0.5) return floor + 1;
+  if (diff < 0.5) return floor;
+  return floor % 2 === 0 ? floor : floor + 1;
 };
 
 /** One laya question, built from a validated adapter question. */
@@ -170,32 +135,129 @@ const toLayaQuestion = (question: Question): LayaQuestion => {
   };
 };
 
+/** Shape one engine answer for discrete mode: labels, booleans, levels. */
+const discreteAnswer = (answer: SystemAnswer): AdapterAnswer => {
+  if (answer.type === "choice") return answer.choice;
+  if (answer.type === "score") return roundHalfEven(answer.score);
+  return answer.noul >= 0.5;
+};
+
+/** Shape one engine answer for probabilistic mode. */
+const probabilisticAnswer = (answer: SystemAnswer): AdapterAnswer => {
+  if (answer.type === "noul") return answer.noul;
+  return answer.probabilities;
+};
+
 /**
  * Provider running the local laya decision engine
- * (github.com/NandhaKishorM/laya, `pip install laya`) through a one-shot
- * python process per request. laya answers the adapter's typed questions
- * natively — choice, score, and noul — so no text generation is involved
- * and token counts stay zero.
+ * (github.com/NandhaKishorM/laya) in-process through the vendored
+ * `laya-ts` port (`src/laya-ts`): a BPE tokenizer, a pure string
+ * sequence builder, and ONNX Runtime sessions over the exported
+ * `encoder.onnx` + `head.onnx` weights. laya answers the adapter's typed
+ * questions natively — choice, score, and noul — so no text generation
+ * is involved and token counts stay zero.
+ *
+ * Unlike the python package it replaces, the engine cannot read
+ * safetensors checkpoints, so the ONNX export must exist: either in the
+ * directories named by the `models` option or `LAYA_MODEL_DIR`, or on
+ * the Hugging Face hub at the location a checkpoint resolves to.
  */
 class LayaProvider implements ClosableProvider {
   readonly modelName: string;
   readonly #model: LayaModel;
-  readonly #python: string;
+  readonly #device: "cpu" | "cuda";
+  readonly #numThreads: number | undefined;
+  readonly #session: SessionProvider | undefined;
+  readonly #locations: Partial<Record<EngineModel, LayaModelLocation>>;
+  readonly #envDir: string | undefined;
+  readonly #agents = new Map<EngineModel, Agent>();
+  #router: Router | undefined;
 
   constructor(model: LayaModel, options: LayaOptions = {}) {
     if (!(LAYA_MODELS as readonly string[]).includes(model))
       throw new Error(`laya model must be one of ${LAYA_MODELS.join(", ")}`);
     this.modelName = `laya/${model}`;
     this.#model = model;
-    this.#python = options.python ?? process.env.LAYA_PYTHON ?? "python3";
+    this.#device = options.device ?? "cpu";
+    this.#numThreads = options.numThreads;
+    this.#session = options.session;
+    this.#locations = options.models ?? {};
+    this.#envDir = process.env.LAYA_MODEL_DIR;
   }
 
-  /** No-op: each request spawns a fresh short-lived process. */
+  /** No-op: agents are cached lazily and dropped on close. */
   close(): void {
-    // Nothing to release.
+    this.#agents.clear();
+    this.#router?.unload();
+    this.#router = undefined;
   }
 
-  /** Run one evaluation through the local laya package. */
+  /** Resolve where one checkpoint's ONNX bundle lives. */
+  #resolve(model: EngineModel): ResolvedModel {
+    const location = this.#locations[model];
+    if (typeof location === "string")
+      return { source: location, subfolder: null };
+    if (location !== undefined)
+      return {
+        source: location.repo,
+        subfolder: location.subfolder ?? null,
+      };
+    if (this.#envDir !== undefined)
+      return { source: `${this.#envDir}/${model}`, subfolder: null };
+    const fallback = DEFAULT_LOCATIONS[model];
+    return { source: fallback.repo, subfolder: fallback.subfolder };
+  }
+
+  /** Load (or reuse) the agent for one engine model. */
+  async #loadAgent(model: EngineModel): Promise<Agent> {
+    const cached = this.#agents.get(model);
+    if (cached !== undefined) return cached;
+    let agent: Agent;
+    try {
+      agent =
+        this.#session !== undefined
+          ? new Agent({ provider: this.#session })
+          : await this.#loadFromDisk(model);
+    } catch (error) {
+      throw new TypeSafeError(
+        `the laya ${JSON.stringify(model)} checkpoint failed to load: ` +
+          `${describeError(error)}; export its ONNX weights once with ` +
+          "scripts/export_onnx.py, or point the `models` option or " +
+          "LAYA_MODEL_DIR at an exported bundle",
+      );
+    }
+    this.#agents.set(model, agent);
+    return agent;
+  }
+
+  /** Build the ONNX-backed agent from the checkpoint's resolved location. */
+  async #loadFromDisk(model: EngineModel): Promise<Agent> {
+    const { source, subfolder } = this.#resolve(model);
+    return Agent.load(source, {
+      subfolder,
+      device: this.#device,
+      numThreads: this.#numThreads,
+    });
+  }
+
+  /** The engine call for this provider's model. */
+  async #engine(): Promise<EngineCall> {
+    if (this.#model !== "router") {
+      const agent = await this.#loadAgent(this.#model);
+      return (state, questions) => agent.predict(state, questions);
+    }
+    // The router picks english or multilingual per state: the same
+    // script/stopword detection the python Router runs, with agents
+    // loaded through this provider's locations.
+    this.#router ??= new Router({
+      maxLoaded: 3,
+      loader: (name: ModelName) => this.#loadAgent(name),
+    });
+    const router = this.#router;
+    return (state, questions) => router.predict(state, questions);
+  }
+
+  /** Run one evaluation through the in-process laya engine. */
   async request(
     _messages: readonly Message[],
     options: ProviderRequestOptions,
@@ -210,28 +272,35 @@ class LayaProvider implements ClosableProvider {
     const questions: Record<string, LayaQuestion> = {};
     for (const [questionId, question] of Object.entries(typed.questions))
       questions[questionId] = toLayaQuestion(question);
-    const result = await defaultRunner(
-      this.#python,
-      LAYA_SCRIPT,
-      JSON.stringify({
-        model: this.#model,
-        mode: typed.answerMode,
-        state: typed.state,
-        questions,
-      }),
-    );
-    validatePythonResult(result);
+    const predict = await this.#engine();
+    const result = await predict(typed.state, questions);
+    const answers: Record<string, AdapterAnswer> = {};
+    for (const questionId of Object.keys(questions)) {
+      const answer = result.answers[questionId];
+      if (answer === undefined)
+        throw new TypeSafeError(
+          `laya returned no answer for question ${JSON.stringify(questionId)}`,
+        );
+      answers[questionId] =
+        typed.answerMode === "discrete"
+          ? discreteAnswer(answer)
+          : probabilisticAnswer(answer);
+    }
     // A local encoder has no token metering; the adapter still measures
     // latency, but cost columns stay excluded.
-    return { text: result.stdout, inputTokens: 0, outputTokens: 0 };
+    return {
+      text: JSON.stringify({ answers }),
+      inputTokens: 0,
+      outputTokens: 0,
+    };
   }
 
-  /** Map a laya process failure to an SDK error. */
+  /** Map an engine failure to an SDK error. */
   translateError(error: unknown): TypeSafeError {
     if (error instanceof TypeSafeError) return error;
     return new TypeSafeError(describeError(error));
   }
 }
 
-export type { LayaModel, LayaOptions, PythonResult, PythonRunner };
-export { defaultRunner, LAYA_MODELS, LAYA_SCRIPT, LayaProvider };
+export type { EngineModel, LayaModel, LayaModelLocation, LayaOptions };
+export { LAYA_MODELS, LayaProvider };

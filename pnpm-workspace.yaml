@@ -2,6 +2,7 @@ allowBuilds:
   '@ast-grep/cli': true
   esbuild: true
   msw: true
+  onnxruntime-node: true
 minimumReleaseAgeExclude:
   - openai@7.20.0
 scriptShell: bash

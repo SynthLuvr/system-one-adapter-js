@@ -1,0 +1,5 @@
+# Vendored third-party code is excluded from the repo toolchain: ast-grep,
+# oxlint, jscpd, and (via biome's vcs.useIgnoreFile) biome skip git-ignored
+# paths, and git itself keeps tracking these already-committed files. Add new
+# files here with `git add -f`. See VENDOR.md for the resync procedure.
+*
