@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { choice, noul, score } from "@typesafe-ai/sdk";
-import { afterEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { SystemOneAdapterClient } from "../client.js";
 import { Agent, Router, VERSION } from "../laya-ts/index.js";
 import type { Batch, SessionProvider } from "../laya-ts/providers.js";
@@ -63,13 +63,12 @@ const fakeSession = (): SessionProvider => ({
 const client = (
   model: LayaModel,
   llmAnswerMode: "probabilities" | "discrete" = "probabilities",
-  session: SessionProvider = fakeSession(),
 ): SystemOneAdapterClient =>
   new SystemOneAdapterClient({
     structuredOutputs: true,
     llmAnswerMode,
     normalizeProbabilities: true,
-    model: new LayaProvider(model, { session }),
+    model: new LayaProvider(model, { session: fakeSession() }),
   });
 
 const QUESTIONS = {
@@ -122,6 +121,18 @@ const withEnv = (
   });
 };
 
+/** One provider request carrying a single noul question. */
+const noulRequest = (provider: LayaProvider) =>
+  provider.request([{ role: "user", content: "unused" }], {
+    schema: {},
+    structured: true,
+    typed: {
+      state: { body: "x" },
+      questions: { positive: noul("Good?") },
+      answerMode: "probabilities",
+    },
+  });
+
 describe("LayaProvider", () => {
   it("rejects unknown laya models", () => {
     expect(() => new LayaProvider("flash" as LayaModel)).toThrow(
@@ -151,17 +162,9 @@ describe("LayaProvider", () => {
       const provider = new LayaProvider("english", {
         models: { english: dir },
       });
-      await expect(
-        provider.request([{ role: "user", content: "unused" }], {
-          schema: {},
-          structured: true,
-          typed: {
-            state: { body: "x" },
-            questions: { positive: noul("Good?") },
-            answerMode: "probabilities",
-          },
-        }),
-      ).rejects.toThrow(/failed to load.*export_onnx/su);
+      await expect(noulRequest(provider)).rejects.toThrow(
+        /failed to load.*export_onnx/su,
+      );
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -176,17 +179,9 @@ describe("LayaProvider", () => {
         // override: without the variable, the checkpoint would resolve to
         // the default Hugging Face locations instead of the local tree.
         const provider = new LayaProvider("english");
-        await expect(
-          provider.request([{ role: "user", content: "unused" }], {
-            schema: {},
-            structured: true,
-            typed: {
-              state: { body: "x" },
-              questions: { positive: noul("Good?") },
-              answerMode: "probabilities",
-            },
-          }),
-        ).rejects.toThrow(join(base, "english"));
+        await expect(noulRequest(provider)).rejects.toThrow(
+          join(base, "english"),
+        );
       });
     } finally {
       await rm(base, { recursive: true, force: true });
@@ -195,10 +190,6 @@ describe("LayaProvider", () => {
 });
 
 describe("LayaProvider against the in-process engine", () => {
-  afterEach(async () => {
-    delete process.env.LAYA_MODEL_DIR;
-  });
-
   it("evaluates typed questions through the routing engine", async () => {
     const adapter = client("router");
     const response = await adapter.systemOne({
@@ -281,24 +272,9 @@ describe("LayaProvider against the in-process engine", () => {
 
   it("drops cached agents on close and still serves later requests", async () => {
     const provider = new LayaProvider("english", { session: fakeSession() });
-    const options = {
-      schema: {},
-      structured: true,
-      typed: {
-        state: { body: "x" },
-        questions: { positive: noul("Good?") },
-        answerMode: "probabilities" as const,
-      },
-    };
-    const first = await provider.request(
-      [{ role: "user", content: "unused" }],
-      options,
-    );
+    const first = await noulRequest(provider);
     provider.close();
-    const second = await provider.request(
-      [{ role: "user", content: "unused" }],
-      options,
-    );
+    const second = await noulRequest(provider);
     expect(JSON.parse(second.text)).toEqual(JSON.parse(first.text));
   });
 });

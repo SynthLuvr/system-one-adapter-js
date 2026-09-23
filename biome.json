@@ -1,12 +1,4 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.5.10/schema.json",
-  "extends": ["ts-canon/presets/biome.preset.json"],
-  "overrides": [
-    {
-      "includes": ["src/laya-ts/**"],
-      "assist": { "enabled": false },
-      "formatter": { "enabled": false },
-      "linter": { "enabled": false }
-    }
-  ]
+  "extends": ["ts-canon/presets/biome.preset.json"]
 }
