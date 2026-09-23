@@ -2,16 +2,33 @@
 
 ## Unreleased
 
-### Bug fixes
+### Breaking Changes
 
-- the laya provider now spawns its python one-shot with `PYTHONUTF8=1`:
-  python decodes piped stdin with the locale codec, which on Windows is
-  `cp1252` — `”` (U+201D) becomes a lone surrogate the laya engine
-  rejects with a `TypeError: TextEncodeInput …`, and every other
-  non-ASCII character silently degrades into mojibake, skewing
-  judgments; inherited case-variants of the variable are dropped so
-  Windows’ case-insensitive environment never carries two `PYTHONUTF8`
-  entries
+- the laya provider no longer spawns python: it runs the laya engine
+  in-process through the upstream `laya-ts` TypeScript port, installed
+  as a GitHub dependency from the `SynthLuvr/laya` fork (tag
+  `laya-ts-v0.1.0`), which commits the compiled `dist/` because upstream
+  does not publish the package to npm; it drives the exported
+  `encoder.onnx` + `head.onnx` weights with onnxruntime-node; the
+  `python` option, the `LAYA_PYTHON` environment variable, and the
+  `PythonRunner`, `PythonResult`, `defaultRunner`, and `LAYA_SCRIPT`
+  exports are gone, replaced by the `models`, `device`, `numThreads`,
+  and `session` options on `LayaOptions` — and because the engine reads
+  ONNX exports instead of safetensors checkpoints, the weights must be
+  exported once per checkpoint with the export script shipped inside the
+  `laya-ts` package (or served from a Hugging Face repo that hosts
+  them); locations come from the `models` option or `LAYA_MODEL_DIR`,
+  defaulting to the official `convaiinnovations/laya` bundle layout
+
+### Features
+
+- `LayaOptions.device` selects the ONNX execution device (`cpu` or
+  `cuda`, with an automatic CPU fallback), `numThreads` caps ONNX
+  Runtime intra-op parallelism, and `session` injects a prebuilt ONNX
+  session shim for tests and custom runtimes; the `router` model now
+  routes states to the english or multilingual checkpoint in-process
+  with laya’s script/stopword language detection, loading checkpoints
+  lazily and unloading them on `close`
 
 ## v0.4.0 (2026-09-21)
 

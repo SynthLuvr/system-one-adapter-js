@@ -115,7 +115,16 @@ with direct Anthropic API calls.
 For evaluations that need no text generation at all, the adapter ships a
 provider for [laya](https://github.com/NandhaKishorM/laya), a local
 System 1 decision engine that answers typed questions (`choice`,
-`score`, `noul`) with calibrated probabilities in a single forward pass:
+`score`, `noul`) with calibrated probabilities in a single forward pass.
+The engine runs fully in-process: the adapter depends on
+[`laya-ts`](https://github.com/SynthLuvr/laya/tree/laya-ts-v0.1.0/laya-ts),
+the upstream TypeScript port, installed as a GitHub dependency from the
+[SynthLuvr/laya](https://github.com/SynthLuvr/laya) fork — which commits
+the compiled `dist/` — because upstream has not published the package to
+npm. It tokenizes, builds the question sequence, and runs the exported
+ONNX weights through
+[onnxruntime-node](https://www.npmjs.com/package/onnxruntime-node) — no
+python involved:
 
 ``` ts
 const client = new SystemOneAdapterClient({
@@ -126,30 +135,56 @@ const client = new SystemOneAdapterClient({
 });
 ```
 
-Or construct a `LayaProvider` directly to override the python
-interpreter:
+`onnxruntime-node` is an optional peer dependency: only consumers using
+the laya provider need to install it (`pnpm add onnxruntime-node`),
+alongside the adapter.
+
+Because the engine reads exported ONNX weights rather than the
+checkpoints’ safetensors, the weights must be exported once per
+checkpoint with the export script shipped inside the installed `laya-ts`
+package (requires a one-time python environment with
+`pip install laya torch`):
+
+``` bash
+python node_modules/laya-ts/scripts/export_onnx.py --repo convaiinnovations/laya --out-dir ./models/english
+python node_modules/laya-ts/scripts/export_onnx.py --repo convaiinnovations/laya --subfolder multilingual --out-dir ./models/multilingual
+python node_modules/laya-ts/scripts/export_onnx.py --repo convaiinnovations/laya --subfolder typed-decisions --out-dir ./models/typed-decisions
+```
+
+Point the provider at the exported tree with `LAYA_MODEL_DIR` (one
+subdirectory per checkpoint name) or per-checkpoint locations:
 
 ``` ts
-import { LayaProvider } from "system-one-adapter";
-
 const response = await client.systemOne({
   state,
   questions,
-  model: new LayaProvider("router", { python: "/usr/bin/python3.12" }),
+  model: new LayaProvider("router", {
+    device: "cpu", // or "cuda" with a CPU fallback
+    models: { multilingual: "./models/multilingual" },
+  }),
 });
 ```
 
-laya runs as a local python package (`pip install laya`); each request
-spawns one short-lived `python3` process (override with the
-`LAYA_PYTHON` environment variable or the `python` option) with
-`PYTHONUTF8=1` forced: python otherwise decodes piped stdin with the
-locale codec, which on Windows is `cp1252` and mangles non-ASCII text
-like `”`. The first run downloads the checkpoints from the Hugging Face
-hub. Because laya is a local encoder, token counts stay zero: latency is
-reported while cost columns stay excluded. Each provider request carries
-the validated questions in `ProviderRequestOptions.typed`, so laya
-evaluates the same typed questions an LLM provider is prompted with —
-including score questions, which laya answers natively.
+A location is either a local directory or a Hugging Face repo id (with
+optional subfolder) hosting `encoder.onnx`, `head.onnx`,
+`tokenizer.json`, and `rl_agent_config.json`:
+
+``` ts
+new LayaProvider("english", {
+  models: { english: { repo: "some-org/laya-onnx", subfolder: "english" } },
+});
+```
+
+Without any location, checkpoints resolve to the official
+`convaiinnovations/laya` bundle layout, which does not ship ONNX exports
+yet — the first request then fails with the export instructions above.
+The `router` model routes each state to the english or multilingual
+checkpoint by language detection, loading checkpoints lazily. Because
+laya is a local encoder, token counts stay zero: latency is reported
+while cost columns stay excluded. Each provider request carries the
+validated questions in `ProviderRequestOptions.typed`, so laya evaluates
+the same typed questions an LLM provider is prompted with — including
+score questions, which laya answers natively.
 
 ### Response
 
@@ -229,23 +264,9 @@ retries, and the debug traces are verified end to end. Unhandled
 requests are rejected, so a test that triggers unintended network
 traffic fails.
 
-The laya tests go one step further and run the real decision engine:
-every laya evaluation spawns the provider’s python one-shot for real and
-answers with the actual `convaiinnovations/laya` checkpoints, which are
-downloaded from the Hugging Face hub on the first run (expect the first
-test to take a few minutes while they fetch). Point the suite at an
-interpreter with laya installed — a repo-local venv is picked up
-automatically (it lives under `node_modules/.cache` so the repo tooling
-ignores it):
-
-``` bash
-uv venv node_modules/.cache/laya-venv
-uv pip install --python node_modules/.cache/laya-venv laya \
-  --torch-backend=cpu
-```
-
-`pip install laya` into any `python3` works too, as does exporting
-`LAYA_PYTHON`. Nothing is ever skipped: without an interpreter the
-engine-backed tests fail with these instructions. CI provisions a cached
-CPU-only venv and checkpoints so every pull request runs the full suite,
-laya engine included.
+The laya tests drive the laya-ts package through a deterministic fake
+ONNX session, so they exercise the full provider path — question
+building, batching, answer shaping, language routing — without weights,
+and never touch the network. To run the engine on real exported weights,
+export the checkpoints as shown above and set `LAYA_MODEL_DIR`; the
+provider then loads them exactly as an evaluation would.

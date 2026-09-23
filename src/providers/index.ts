@@ -36,12 +36,12 @@ export {
   type ProviderResult,
 } from "./base.js";
 export {
+  type EngineModel,
   LAYA_MODELS,
   type LayaModel,
+  type LayaModelLocation,
   type LayaOptions,
   LayaProvider,
-  type PythonResult,
-  type PythonRunner,
 } from "./laya.js";
 export {
   AnthropicProvider,
