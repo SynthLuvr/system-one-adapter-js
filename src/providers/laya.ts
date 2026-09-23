@@ -107,6 +107,12 @@ const toLayaQuestion = (question: Question): LayaQuestion => {
   };
 };
 
+/** Interpret one `models` option location as a repo spec. */
+const toModelSpec = (location: LayaModelLocation): ModelSpec =>
+  typeof location === "string"
+    ? { repo: location, subfolder: null }
+    : { repo: location.repo, subfolder: location.subfolder ?? null };
+
 /** Shape one engine answer for discrete mode: labels, booleans, levels. */
 const discreteAnswer = (answer: SystemAnswer): AdapterAnswer => {
   if (answer.type === "choice") return answer.choice;
@@ -120,25 +126,22 @@ const probabilisticAnswer = (answer: SystemAnswer): AdapterAnswer => {
   return answer.probabilities;
 };
 
-/** Shape the engine's answers to every asked question for `mode`. */
+/**
+ * Shape the engine's answers to every asked question for `mode`; the
+ * engine answers each question it is given exactly once.
+ */
 const shapeAnswers = (
   questionIds: readonly string[],
   engineAnswers: Record<string, SystemAnswer>,
   mode: AnswerMode,
 ): Record<string, AdapterAnswer> => {
-  const answers: Record<string, AdapterAnswer> = {};
-  for (const questionId of questionIds) {
-    const answer = engineAnswers[questionId];
-    if (answer === undefined)
-      throw new TypeSafeError(
-        `laya returned no answer for question ${JSON.stringify(questionId)}`,
-      );
-    answers[questionId] =
-      mode === "discrete"
-        ? discreteAnswer(answer)
-        : probabilisticAnswer(answer);
-  }
-  return answers;
+  const shape = mode === "discrete" ? discreteAnswer : probabilisticAnswer;
+  return Object.fromEntries(
+    questionIds.map((questionId) => [
+      questionId,
+      shape(engineAnswers[questionId]),
+    ]),
+  );
 };
 
 /**
@@ -168,7 +171,7 @@ class LayaProvider implements ClosableProvider {
   #router: Router | undefined;
 
   constructor(model: LayaModel, options: LayaOptions = {}) {
-    if (!(LAYA_MODELS as readonly string[]).includes(model))
+    if (!LAYA_MODELS.includes(model))
       throw new Error(`laya model must be one of ${LAYA_MODELS.join(", ")}`);
     this.modelName = `laya/${model}`;
     this.#model = model;
@@ -186,13 +189,13 @@ class LayaProvider implements ClosableProvider {
     this.#router = undefined;
   }
 
-  /** Resolve where one checkpoint's ONNX bundle lives. */
+  /**
+   * Resolve one checkpoint's ONNX bundle: a `models` entry wins over
+   * `LAYA_MODEL_DIR`, which wins over the default hub layout.
+   */
   #resolve(model: EngineModel): ModelSpec {
     const location = this.#locations[model];
-    if (typeof location === "string")
-      return { repo: location, subfolder: null };
-    if (location !== undefined)
-      return { repo: location.repo, subfolder: location.subfolder ?? null };
+    if (location !== undefined) return toModelSpec(location);
     if (this.#envDir !== undefined)
       return { repo: `${this.#envDir}/${model}`, subfolder: null };
     return DEFAULT_MODELS[model];
@@ -236,8 +239,9 @@ class LayaProvider implements ClosableProvider {
   /** The engine for this provider's model: one agent, or the router. */
   async #engine(): Promise<Agent | Router> {
     if (this.#model !== "router") return this.#loadAgent(this.#model);
-    // The router sends each state to english or multilingual by language
-    // detection, loading checkpoints through this provider's locations.
+    // The router picks english or multilingual by language detection and
+    // loads checkpoints through this provider's locations; maxLoaded
+    // spans all of them, which the agent cache pins regardless.
     this.#router ??= new Router({
       maxLoaded: 3,
       loader: (name: ModelName) => this.#loadAgent(name),

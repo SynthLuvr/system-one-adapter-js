@@ -4,7 +4,6 @@ import { join } from "node:path";
 import { choice, noul, score } from "@typesafe-ai/sdk";
 import {
   Agent,
-  type Batch,
   type ModelName,
   Router,
   type SessionProvider,
@@ -33,18 +32,12 @@ const logitsFor = (probabilities: number[]): number[] =>
 
 /** Deterministic ONNX session: label 0 wins, mid score, 70% noul. */
 const fakeSession = (): SessionProvider => ({
-  runEncoder: async (batch: Batch) => ({
+  runEncoder: async (batch) => ({
     lastHidden: batch.inputIds.map((row) =>
       row.map(() => [0.5, 0.5, 0.5, 0.5]),
     ),
   }),
-  runHead: async (
-    _hidden: unknown,
-    batch: Batch,
-  ): Promise<{
-    logits: number[][];
-    act: number[][];
-  }> => ({
+  runHead: async (_hidden, batch) => ({
     logits: batch.qtype.map((qtype, r) => {
       // The item's true option count: markerPos is padded to the batch
       // maximum, so the marker mask carries the real length.
