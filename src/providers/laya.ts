@@ -93,10 +93,29 @@ for question_id, question in questions.items():
 print(json.dumps({"answers": answers}))
 `;
 
+/**
+ * Environment for one python one-shot: the calling process's variables
+ * plus `PYTHONUTF8=1`. The adapter pipes UTF-8 JSON to the child, but
+ * python only decodes piped stdin as UTF-8 when its locale says so — on
+ * Windows the locale codec is `cp1252`, which turns `”` (U+201D) into a
+ * lone surrogate the laya engine rejects. UTF-8 mode forces UTF-8
+ * regardless of locale; inherited case-variants of the variable are
+ * dropped first so Windows' case-insensitive environment never carries
+ * two `PYTHONUTF8` entries.
+ */
+const pythonEnv = (): NodeJS.ProcessEnv => {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(process.env))
+    if (key.toLowerCase() !== "pythonutf8" && value !== undefined)
+      env[key] = value;
+  env.PYTHONUTF8 = "1";
+  return env;
+};
+
 /** Spawn the python one-shot process and collect its output. */
 const defaultRunner: PythonRunner = (python, script, stdin) =>
   new Promise((resolve) => {
-    const child = spawn(python, ["-c", script]);
+    const child = spawn(python, ["-c", script], { env: pythonEnv() });
     let stdout = "";
     let stderr = "";
     child.stdout.setEncoding("utf8");

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Bug fixes
+
+- the laya provider now spawns its python one-shot with `PYTHONUTF8=1`,
+  forcing UTF-8 mode: python decodes piped stdin with the locale codec,
+  which on Windows is `cp1252` — `”` (U+201D) then becomes a lone
+  surrogate the laya engine rejects with a
+  `TypeError: TextEncodeInput …`, and every non-ASCII character in the
+  questions and state silently degrades into mojibake, skewing
+  judgments. Inherited case-variants of the variable are dropped so
+  Windows’ case-insensitive environment never carries two `PYTHONUTF8`
+  entries
+
 ## v0.4.0 (2026-09-21)
 
 ### Features

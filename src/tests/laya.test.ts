@@ -98,6 +98,37 @@ const python = (): string => {
   return layaPython;
 };
 
+/**
+ * Run the body with python's UTF-8 mode disabled and the C locale forced
+ * — the codec situation a Windows `cp1252` host presents to the spawned
+ * one-shot (surrogateescape turns undecodable bytes into lone
+ * surrogates there, `strict` raises here; either way the payload breaks).
+ */
+const withNonUtf8Host = (body: () => Promise<void>): Promise<void> => {
+  const overrides: Record<string, string> = {
+    LC_ALL: "C",
+    PYTHONCOERCECLOCALE: "0",
+    PYTHONUTF8: "0",
+  };
+  const previous = Object.fromEntries(
+    Object.keys(overrides).map((key) => [key, process.env[key]]),
+  );
+  Object.assign(process.env, overrides);
+  return body().finally(() => {
+    for (const [key, value] of Object.entries(previous))
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+  });
+};
+
+/** Any interpreter a probe script can run on, laya host or bare system one. */
+const anyPython = async (): Promise<string> => {
+  if (layaPython !== undefined) return layaPython;
+  for (const interpreter of ["python3", "python"])
+    if (await exitsCleanly(interpreter, ["-c", "pass"])) return interpreter;
+  throw new Error("no python interpreter on PATH");
+};
+
 /** A client evaluating through the real laya engine at the given model. */
 const client = (
   model: LayaModel,
@@ -184,6 +215,31 @@ describe("LayaProvider", () => {
     );
     expect(result.code).toBe(-1);
     expect(result.stderr).toContain("adapter-no-such-python");
+  });
+
+  it("reads its UTF-8 payload even on non-UTF-8 hosts", async () => {
+    // The adapter pipes UTF-8 JSON to the child; python must decode it
+    // as UTF-8 even when its locale says otherwise — on Windows that is
+    // cp1252, where ” (U+201D) becomes a lone surrogate the engine
+    // rejects with a TextEncodeInput TypeError.
+    const text = "curly ” quotes — ünïcode";
+    const probe = [
+      "import json, sys",
+      "payload = json.load(sys.stdin)",
+      "report = {'encoding': sys.stdin.encoding, 'text': payload['text']}",
+      "print(json.dumps(report))",
+    ].join("\n");
+    await withNonUtf8Host(async () => {
+      const result = await defaultRunner(
+        await anyPython(),
+        probe,
+        JSON.stringify({ text }),
+      );
+      expect(result.code).toBe(0);
+      const report = JSON.parse(result.stdout);
+      expect(report.encoding.toLowerCase()).toBe("utf-8");
+      expect(report.text).toBe(text);
+    });
   });
 
   it("routes requests through the LAYA_PYTHON interpreter", async () => {
