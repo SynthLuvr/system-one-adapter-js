@@ -24,6 +24,7 @@ import {
   parsePayload,
   recordRequest,
   recordResponse,
+  rejectIncomplete,
   renderMessages,
   systemPrompt,
 } from "./base.js";
@@ -142,13 +143,10 @@ const responsesRequest = (
 /** The refusal text of one Responses output, when the model refused. */
 const refusalText = (
   output: readonly ResponsesOutputItem[],
-): string | undefined => {
-  for (const item of output)
-    if (item.type === "message")
-      for (const part of item.content ?? [])
-        if (part.type === "refusal") return part.refusal;
-  return undefined;
-};
+): string | undefined =>
+  output
+    .flatMap((item) => (item.type === "message" ? (item.content ?? []) : []))
+    .find((part) => part.type === "refusal")?.refusal;
 
 /** Parse one Responses API payload, rejecting unfinished responses. */
 const responsesResult = (response: unknown): ProviderResult => {
@@ -182,10 +180,7 @@ const chatResult = (response: unknown): ProviderResult => {
   );
   const [choice] = payload.choices;
   recordResponse(response, { finishReason: choice.finish_reason });
-  if (choice.finish_reason !== "stop" && choice.finish_reason !== null)
-    throw new TypeSafeError(
-      `OpenAI chat completion did not complete: ${choice.finish_reason}.`,
-    );
+  rejectIncomplete(choice.finish_reason, ["stop"], "OpenAI chat completion");
   return {
     text: choice.message.content ?? "",
     inputTokens: payload.usage?.prompt_tokens ?? null,

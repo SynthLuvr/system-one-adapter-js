@@ -2,7 +2,8 @@ import { type Questions, TypeSafeError } from "@typesafe-ai/sdk";
 import { describe, expect, it } from "vitest";
 import { SystemOneAdapterClient } from "../client.js";
 import { AnthropicProvider } from "../providers/anthropic.js";
-import { type OpenAIApi, OpenAIProvider } from "../providers/openai.js";
+import type { LlmAttempt } from "../providers/base.js";
+import { OpenAIProvider } from "../providers/openai.js";
 import type { AdapterDebug, SystemOneResponse } from "../response.js";
 import {
   ANSWER,
@@ -13,8 +14,12 @@ import {
   openAIResponsesEndpoint,
   openAIResponsesPayload,
   QUESTIONS,
+  type RecordedEndpoint,
   server,
 } from "./msw.js";
+
+/** The document every evaluation in this suite evaluates. */
+const STATE = "A delightful book.";
 
 /** One evaluation's outcome: its response, or its terminal error. */
 type Outcome<Q extends Questions> =
@@ -27,18 +32,13 @@ const evaluate = async <Q extends Questions>(
   questions: Q,
 ): Promise<Outcome<Q>> => {
   try {
-    return {
-      response: await client.systemOne({
-        state: "A delightful book.",
-        questions,
-      }),
-    };
+    return { response: await client.systemOne({ state: STATE, questions }) };
   } catch (caught) {
     return { error: caught as TypeSafeError & { debug?: AdapterDebug } };
   }
 };
 
-/** The empty debug payload of an outcome that unexpectedly carried none. */
+/** The debug payload of an outcome that unexpectedly carried none. */
 const EMPTY_DEBUG: AdapterDebug = {
   max_error: 0,
   invalid_probs: 0,
@@ -51,7 +51,23 @@ const EMPTY_DEBUG: AdapterDebug = {
 const debugOf = (outcome: Outcome<Questions>): AdapterDebug =>
   outcome.response?.debug ?? outcome.error?.debug ?? EMPTY_DEBUG;
 
-/** An evaluation client spending budgets a non-answer must not consume. */
+/**
+ * Assert the evaluation consumed no retry budgets and traced exactly one
+ * attempt, recorded as the endpoint's latest request.
+ */
+const singleAttempt = (
+  debug: AdapterDebug,
+  endpoint: RecordedEndpoint,
+): LlmAttempt => {
+  expect(debug.retry_reasons).toEqual([]);
+  expect(debug.llm_attempts.length).toBe(1);
+  const attempt = debug.llm_attempts[0];
+  expect(attempt.request).toEqual(endpoint.requests.at(-1));
+  expect(() => JSON.stringify(debug)).not.toThrow();
+  return attempt;
+};
+
+/** A client whose retry budgets a non-answer must not consume. */
 const budgetedClient = (
   model: OpenAIProvider | AnthropicProvider,
   structured: boolean,
@@ -78,7 +94,7 @@ describe("chat completion finish reasons", () => {
     async (reason) => {
       const content = ANSWER({ positive: true });
       const chat = openAIChatEndpoint(() =>
-        openAIChatPayload(content, {
+        openAIChatPayload("", {
           choices: [
             {
               index: 0,
@@ -89,16 +105,14 @@ describe("chat completion finish reasons", () => {
         }),
       );
       server.use(chat.handler);
+      const provider = new OpenAIProvider("test-model", {
+        apiKey: "test-key",
+        api: "chat_completions",
+      });
 
       for (const structured of [false, true]) {
         const outcome = await evaluate(
-          budgetedClient(
-            new OpenAIProvider("test-model", {
-              apiKey: "test-key",
-              api: "chat_completions",
-            }),
-            structured,
-          ),
+          budgetedClient(provider, structured),
           QUESTIONS,
         );
         const completed = reason === "stop" || reason === null;
@@ -107,13 +121,9 @@ describe("chat completion finish reasons", () => {
           expect(outcome.error?.message).toBe(
             `OpenAI chat completion did not complete: ${reason}.`,
           );
-
-        const debug = debugOf(outcome);
         expect(chat.requests.length).toBe(structured ? 2 : 1);
-        expect(debug.retry_reasons).toEqual([]);
-        expect(debug.llm_attempts.length).toBe(1);
-        const attempt = debug.llm_attempts[0];
-        expect(attempt.request).toEqual(chat.requests.at(-1));
+
+        const attempt = singleAttempt(debugOf(outcome), chat);
         const response = attempt.llm_response as {
           choices: {
             message: { content: string };
@@ -124,15 +134,20 @@ describe("chat completion finish reasons", () => {
         expect(response.choices[0].finish_reason).toBe(reason);
         expect(attempt.debug_info.finish_reason).toBe(reason);
         expect("error" in attempt.debug_info).toBe(!completed);
-        expect(() => JSON.stringify(debug)).not.toThrow();
       }
     },
   );
 });
 
 describe("openai missing token usage", () => {
+  /** The token-count fields of each API's usage object: input, then output. */
+  const FIELDS = {
+    chat_completions: ["prompt_tokens", "completion_tokens"],
+    responses: ["input_tokens", "output_tokens"],
+  } as const;
+
   it.each(
-    ["chat_completions", "responses"].flatMap((api) =>
+    (["chat_completions", "responses"] as const).flatMap((api) =>
       [
         "omitted",
         "null",
@@ -145,14 +160,10 @@ describe("openai missing token usage", () => {
       ].map((usageCase) => [api, usageCase] as const),
     ),
   )("%s still completes with %s usage", async (api, usageCase) => {
-    const [inputField, outputField] =
-      api === "responses"
-        ? (["input_tokens", "output_tokens"] as const)
-        : (["prompt_tokens", "completion_tokens"] as const);
+    const [inputField, outputField] = FIELDS[api];
     const usage: Record<string, number | null> = {
       [inputField]: 12,
       [outputField]: 7,
-      total_tokens: 19,
     };
     if (usageCase === "missing_input") delete usage[inputField];
     if (usageCase === "missing_output") delete usage[outputField];
@@ -161,56 +172,28 @@ describe("openai missing token usage", () => {
     if (usageCase === "zero") {
       usage[inputField] = 0;
       usage[outputField] = 0;
-      usage.total_tokens = 0;
     }
-    const provider = new OpenAIProvider("test-model", {
-      apiKey: "test-key",
-      ...(api === "responses" ? {} : { api: "chat_completions" as OpenAIApi }),
-    });
+    const payloadUsage =
+      usageCase === "omitted" ? undefined : usageCase === "null" ? null : usage;
+    const overrides = { usage: payloadUsage };
     const payload =
       api === "responses"
-        ? openAIResponsesPayload(
-            ANSWER({ positive: true }),
-            usageCase === "omitted"
-              ? {}
-              : { usage: usageCase === "null" ? null : usage },
-          )
-        : openAIChatPayload(
-            ANSWER({ positive: true }),
-            usageCase === "omitted"
-              ? {}
-              : { usage: usageCase === "null" ? null : usage },
-          );
-    // The payload helpers always carry a usage object; the omitted case
-    // needs the key gone entirely.
-    if (usageCase === "omitted") delete payload.usage;
+        ? openAIResponsesPayload(ANSWER({ positive: true }), overrides)
+        : openAIChatPayload(ANSWER({ positive: true }), overrides);
+    if (payloadUsage === undefined) delete payload.usage;
     const endpoint =
       api === "responses"
         ? openAIResponsesEndpoint(() => payload)
         : openAIChatEndpoint(() => payload);
     server.use(endpoint.handler);
-    const response = await budgetedClient(provider, true).systemOne({
-      state: "A delightful book.",
-      questions: QUESTIONS,
-    });
+    const response = await budgetedClient(
+      new OpenAIProvider("test-model", { apiKey: "test-key", api }),
+      true,
+    ).systemOne({ state: STATE, questions: QUESTIONS });
 
+    const expectedInput = payloadUsage?.[inputField] ?? null;
+    const expectedOutput = payloadUsage?.[outputField] ?? null;
     expect(response.nouls.positive?.noul).toBe(1);
-    const expectedInput = [
-      "omitted",
-      "null",
-      "missing_input",
-      "null_input",
-    ].includes(usageCase)
-      ? null
-      : usage[inputField];
-    const expectedOutput = [
-      "omitted",
-      "null",
-      "missing_output",
-      "null_output",
-    ].includes(usageCase)
-      ? null
-      : usage[outputField];
     expect(response.usage.input_tokens).toBe(expectedInput);
     expect(response.usage.input_tokens_total).toBe(expectedInput);
     expect(response.usage.output_tokens).toBe(expectedOutput);
@@ -219,25 +202,21 @@ describe("openai missing token usage", () => {
     expect(response.usage.n_retries_malformed_structure).toBe(0);
     expect(response.toJSON().usage.input_tokens).toBe(expectedInput);
     expect(response.toJSON().usage.output_tokens).toBe(expectedOutput);
-    expect(response.debug.retry_reasons).toEqual([]);
     expect(endpoint.requests.length).toBe(1);
-    expect(response.debug.llm_attempts.length).toBe(1);
-    const attempt = response.debug.llm_attempts[0];
-    expect(attempt.request).toEqual(endpoint.requests[0]);
+
+    const attempt = singleAttempt(response.debug, endpoint);
     const recorded = (attempt.llm_response as { usage: unknown }).usage;
-    if (usageCase === "omitted" || usageCase === "null")
-      expect(recorded).toBe(usageCase === "null" ? null : undefined);
+    if (payloadUsage == null) expect(recorded).toBe(payloadUsage);
     else
       expect(recorded).toMatchObject(
         Object.fromEntries(
-          Object.entries(usage).filter(([, value]) => value !== null),
+          Object.entries(payloadUsage).filter(([, value]) => value !== null),
         ),
       );
     expect(attempt.debug_info.finish_reason).toBe(
       api === "responses" ? "completed" : "stop",
     );
     expect("error" in attempt.debug_info).toBe(false);
-    expect(() => JSON.stringify(response.debug)).not.toThrow();
   });
 
   it("nulls cumulative totals once any attempt omits a count", async () => {
@@ -247,12 +226,10 @@ describe("openai missing token usage", () => {
         : openAIResponsesPayload(ANSWER({ positive: true }), { usage: null }),
     );
     server.use(responses.handler);
-    const response = await new SystemOneAdapterClient({
-      structuredOutputs: true,
-      llmAnswerMode: "discrete",
-      nRetryMalformedStructure: 1,
-      model: new OpenAIProvider("test-model", { apiKey: "test-key" }),
-    }).systemOne({ state: "A delightful book.", questions: QUESTIONS });
+    const response = await budgetedClient(
+      new OpenAIProvider("test-model", { apiKey: "test-key" }),
+      true,
+    ).systemOne({ state: STATE, questions: QUESTIONS });
 
     expect(responses.requests.length).toBe(2);
     expect(response.usage.n_retries_malformed_structure).toBe(1);
@@ -282,21 +259,18 @@ describe("anthropic stop reasons", () => {
         ? []
         : [{ type: "text", text: ANSWER({ positive: true }) }];
     const messages = anthropicEndpoint(() =>
-      anthropicPayload(ANSWER({ positive: true }), {
-        stop_reason: reason,
-        content,
-      }),
+      anthropicPayload("", { stop_reason: reason, content }),
     );
     server.use(messages.handler);
+    const provider = new AnthropicProvider("claude-haiku-4-5", {
+      apiKey: "test-key",
+    });
     const completed =
       reason === "end_turn" || reason === "stop_sequence" || reason === null;
 
     for (const structured of [false, true]) {
       const outcome = await evaluate(
-        budgetedClient(
-          new AnthropicProvider("claude-haiku-4-5", { apiKey: "test-key" }),
-          structured,
-        ),
+        budgetedClient(provider, structured),
         QUESTIONS,
       );
       if (completed) expect(outcome.response?.nouls.positive?.noul).toBe(1);
@@ -308,13 +282,9 @@ describe("anthropic stop reasons", () => {
         expect(outcome.error?.message).toBe(
           `Anthropic response did not complete: ${reason}.`,
         );
-
-      const debug = debugOf(outcome);
       expect(messages.requests.length).toBe(structured ? 2 : 1);
-      expect(debug.retry_reasons).toEqual([]);
-      expect(debug.llm_attempts.length).toBe(1);
-      const attempt = debug.llm_attempts[0];
-      expect(attempt.request).toEqual(messages.requests.at(-1));
+
+      const attempt = singleAttempt(debugOf(outcome), messages);
       const response = attempt.llm_response as {
         content: unknown[];
         stop_reason: string | null;
@@ -323,7 +293,6 @@ describe("anthropic stop reasons", () => {
       expect(response.stop_reason).toBe(reason);
       expect(attempt.debug_info.finish_reason).toBe(reason);
       expect("error" in attempt.debug_info).toBe(!completed);
-      expect(() => JSON.stringify(debug)).not.toThrow();
     }
   });
 });
@@ -366,24 +335,18 @@ describe("openai responses refusals", () => {
         }),
       );
       server.use(responses.handler);
+      const provider = new OpenAIProvider("test-model", { apiKey: "test-key" });
 
       for (const structured of [false, true]) {
         const outcome = await evaluate(
-          budgetedClient(
-            new OpenAIProvider("test-model", { apiKey: "test-key" }),
-            structured,
-          ),
+          budgetedClient(provider, structured),
           QUESTIONS,
         );
         expect(outcome.error?.message).toBe(
           `OpenAI response was a refusal: ${refusal}`,
         );
 
-        const debug = debugOf(outcome);
-        expect(debug.retry_reasons).toEqual([]);
-        expect(debug.llm_attempts.length).toBe(1);
-        const attempt = debug.llm_attempts[0];
-        expect(attempt.request).toEqual(responses.requests.at(-1));
+        const attempt = singleAttempt(debugOf(outcome), responses);
         const lastMessage = (
           attempt.llm_response as {
             output: { content: { refusal?: string }[] }[];
@@ -392,7 +355,6 @@ describe("openai responses refusals", () => {
         expect(lastMessage?.content[0]?.refusal).toBe(refusal);
         expect(attempt.debug_info.finish_reason).toBe("completed");
         expect(attempt.debug_info.error).toContain("refusal");
-        expect(() => JSON.stringify(debug)).not.toThrow();
       }
       expect(responses.requests.length).toBe(2);
     },

@@ -14,17 +14,14 @@ import type { ProbabilityDebug } from "./utils/probabilityNormalization.js";
 
 /**
  * Token usage of the final attempt alongside cumulative retry accounting.
- * The SDK's `Usage` requires numeric counts; here unreported counts are
- * `null`, so both per-attempt and cumulative fields override it.
+ * Unlike the SDK's `Usage`, counts are nullable: `input_tokens` and
+ * `output_tokens` are `null` when the final attempt went unreported, and
+ * the `_total` counts are `null` once any attempt did.
  */
 interface AdapterUsage extends Omit<Usage, "input_tokens" | "output_tokens"> {
-  /** Final-attempt input tokens, or `null` when the attempt went unreported. */
   input_tokens: number | null;
-  /** Final-attempt output tokens, or `null` when the attempt went unreported. */
   output_tokens: number | null;
-  /** Cumulative input tokens, or `null` if any attempt omitted its count. */
   input_tokens_total: number | null;
-  /** Cumulative output tokens, or `null` if any attempt omitted its count. */
   output_tokens_total: number | null;
   n_retries: number;
   n_retries_malformed_structure: number;

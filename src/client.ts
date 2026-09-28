@@ -195,6 +195,15 @@ const convertLlmAnswer = (
   };
 };
 
+/**
+ * Add token counts, where any unreported (`null`) count makes the sum
+ * `null`; reported counts, including zero, keep adding up.
+ */
+const addTokens = (
+  total: number | null,
+  tokens: number | null,
+): number | null => (total === null || tokens === null ? null : total + tokens);
+
 /** State shared by one evaluation's provider attempts. */
 class EvaluationRun {
   readonly retryReasons: RetryReason[] = [];
@@ -216,16 +225,14 @@ class EvaluationRun {
   ) {}
 
   #record(result: ProviderResult): void {
-    // A cumulative count is null once any attempt omitted that count;
-    // reported counts, including zero, keep adding up.
-    this.inputTokensTotal =
-      this.inputTokensTotal !== null && result.inputTokens !== null
-        ? this.inputTokensTotal + result.inputTokens
-        : null;
-    this.outputTokensTotal =
-      this.outputTokensTotal !== null && result.outputTokens !== null
-        ? this.outputTokensTotal + result.outputTokens
-        : null;
+    this.inputTokensTotal = addTokens(
+      this.inputTokensTotal,
+      result.inputTokens,
+    );
+    this.outputTokensTotal = addTokens(
+      this.outputTokensTotal,
+      result.outputTokens,
+    );
   }
 
   async #request(
