@@ -451,7 +451,7 @@ describe("anthropic messages transport", () => {
 });
 
 describe("gemini interactions transport", () => {
-  /** A Gemini provider, built like production code would. */
+  /** A Gemini provider against the recorded Interactions endpoint. */
   const geminiProvider = (): GeminiProvider =>
     new GeminiProvider("gemini-3.8-flash", { apiKey: "test-key" });
 

@@ -56,9 +56,9 @@ interface InteractionParams {
 }
 
 /**
- * Map a Gemini SDK error to an SDK error. The Interactions API surfaces its
- * own `APIError` hierarchy, whose classes `@google/genai` does not export, so
- * transport failures are recognized by the class name the SDK sets.
+ * Map a Gemini SDK error to an SDK error. `@google/genai` does not export the
+ * Interactions API's error classes, so transport failures are recognized by
+ * the class name the SDK sets.
  */
 const translateError = (error: unknown): TypeSafeError => {
   if (error instanceof TypeSafeError) return error;
@@ -69,15 +69,17 @@ const translateError = (error: unknown): TypeSafeError => {
     return new APIUserAbortError(undefined, { cause: error });
   if (name === "APIConnectionError")
     return new APIConnectionError(describeError(error), { cause: error });
-  const status = (error as { status?: unknown }).status;
-  if (typeof status === "number") {
-    const payload = error as { error?: unknown; headers?: Headers };
-    return APIError.fromResponse(
-      status,
-      payload.error,
-      payload.headers ?? new Headers(),
-    );
-  }
+  const {
+    status,
+    error: body,
+    headers,
+  } = error as {
+    status?: unknown;
+    error?: unknown;
+    headers?: Headers;
+  };
+  if (typeof status === "number")
+    return APIError.fromResponse(status, body, headers ?? new Headers());
   return new TypeSafeError(describeError(error));
 };
 
@@ -99,9 +101,6 @@ const payloadTypes = scope({
   },
 }).export();
 
-/** One validated Interactions API usage record. */
-type Usage = typeof payloadTypes.Usage.infer;
-
 /**
  * The SDK attaches a non-cloneable `sdkHttpResponse`, holding the raw
  * `Response`, to every interaction; drop it before the trace snapshot.
@@ -110,17 +109,6 @@ const withoutSdkHttpResponse = (response: unknown): unknown => {
   if (typeof response !== "object" || response === null) return response;
   const { sdkHttpResponse, ...rest } = response as Record<string, unknown>;
   return sdkHttpResponse === undefined ? response : rest;
-};
-
-/** Read one required token count, rejecting an unreported usage field. */
-const tokenCount = (
-  usage: Usage,
-  field: "total_input_tokens" | "total_output_tokens",
-): number => {
-  const value = usage[field];
-  if (value === undefined)
-    throw new TypeSafeError("Gemini response omitted usage.");
-  return value;
 };
 
 /** Parse one Interactions API payload, rejecting unfinished interactions. */
@@ -133,18 +121,16 @@ const geminiResult = (response: unknown): ProviderResult => {
     finishReason: payload.status,
   });
   if (payload.status !== "completed") {
-    let reason = payload.status === "" ? "unknown" : payload.status;
-    if (payload.errors != null && payload.errors.length > 0)
-      reason = JSON.stringify(payload.errors);
+    const errors = payload.errors ?? [];
+    const reason =
+      errors.length > 0 ? JSON.stringify(errors) : payload.status || "unknown";
     throw new TypeSafeError(`Gemini response did not complete: ${reason}.`);
   }
-  if (payload.usage == null)
+  const { total_input_tokens: inputTokens, total_output_tokens: outputTokens } =
+    payload.usage ?? {};
+  if (inputTokens === undefined || outputTokens === undefined)
     throw new TypeSafeError("Gemini response omitted usage.");
-  return {
-    text: payload.output_text ?? "",
-    inputTokens: tokenCount(payload.usage, "total_input_tokens"),
-    outputTokens: tokenCount(payload.usage, "total_output_tokens"),
-  };
+  return { text: payload.output_text ?? "", inputTokens, outputTokens };
 };
 
 /** The request parameters for one Interactions API call. */
@@ -185,12 +171,11 @@ class GeminiProvider implements Provider {
     });
   }
 
-  /** No-op: this SDK version owns no connection pool to release. */
   close(): void {
-    // Nothing to release; the SDK uses the global fetch agent.
+    // No-op: this SDK version owns no connection pool to release.
   }
 
-  /** Perform one Interactions request and return its raw payload and usage. */
+  /** Perform one Interactions request and return its parsed text and usage. */
   async request(
     messages: readonly Message[],
     options: ProviderRequestOptions,

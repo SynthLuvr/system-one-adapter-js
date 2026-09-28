@@ -2,7 +2,7 @@ import { type Questions, TypeSafeError } from "@typesafe-ai/sdk";
 import { describe, expect, it } from "vitest";
 import { SystemOneAdapterClient } from "../client.js";
 import { AnthropicProvider } from "../providers/anthropic.js";
-import type { LlmAttempt } from "../providers/base.js";
+import type { LlmAttempt, Provider } from "../providers/base.js";
 import { GeminiProvider } from "../providers/gemini.js";
 import { OpenAIProvider } from "../providers/openai.js";
 import type { AdapterDebug, SystemOneResponse } from "../response.js";
@@ -70,9 +70,13 @@ const singleAttempt = (
   return attempt;
 };
 
+/** A Gemini provider against the recorded Interactions endpoint. */
+const geminiProvider = (): GeminiProvider =>
+  new GeminiProvider("gemini-3.8-flash", { apiKey: "test-key" });
+
 /** A client whose retry budgets a non-answer must not consume. */
 const budgetedClient = (
-  model: OpenAIProvider | AnthropicProvider | GeminiProvider,
+  model: Provider,
   structured: boolean,
 ): SystemOneAdapterClient =>
   new SystemOneAdapterClient({
@@ -379,9 +383,7 @@ describe("gemini interaction statuses", () => {
       geminiPayload(ANSWER({ positive: true }), { status }),
     );
     server.use(interactions.handler);
-    const provider = new GeminiProvider("gemini-3.8-flash", {
-      apiKey: "test-key",
-    });
+    const provider = geminiProvider();
     const completed = status === "completed";
 
     for (const structured of [false, true]) {
@@ -410,10 +412,7 @@ describe("gemini interaction statuses", () => {
     );
     server.use(interactions.handler);
     const outcome = await evaluate(
-      budgetedClient(
-        new GeminiProvider("gemini-3.8-flash", { apiKey: "test-key" }),
-        true,
-      ),
+      budgetedClient(geminiProvider(), true),
       QUESTIONS,
     );
 
@@ -430,10 +429,7 @@ describe("gemini interaction statuses", () => {
     );
     server.use(interactions.handler);
     const outcome = await evaluate(
-      budgetedClient(
-        new GeminiProvider("gemini-3.8-flash", { apiKey: "test-key" }),
-        true,
-      ),
+      budgetedClient(geminiProvider(), true),
       QUESTIONS,
     );
 
@@ -461,10 +457,7 @@ describe("gemini missing token usage", () => {
       server.use(interactions.handler);
 
       const outcome = await evaluate(
-        budgetedClient(
-          new GeminiProvider("gemini-3.8-flash", { apiKey: "test-key" }),
-          true,
-        ),
+        budgetedClient(geminiProvider(), true),
         QUESTIONS,
       );
 
@@ -485,10 +478,10 @@ describe("gemini missing token usage", () => {
         geminiPayload(ANSWER({ positive: true }), { usage }),
       );
       server.use(interactions.handler);
-      const response = await budgetedClient(
-        new GeminiProvider("gemini-3.8-flash", { apiKey: "test-key" }),
-        true,
-      ).systemOne({ state: STATE, questions: QUESTIONS });
+      const response = await budgetedClient(geminiProvider(), true).systemOne({
+        state: STATE,
+        questions: QUESTIONS,
+      });
 
       expect(response.nouls.positive?.noul).toBe(1);
       expect(response.usage.input_tokens).toBe(usage.total_input_tokens);

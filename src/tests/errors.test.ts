@@ -106,32 +106,29 @@ const PROVIDERS = [
         new Headers(),
       ),
   },
+  {
+    provider: "gemini",
+    build: (baseUrl?: string): Provider =>
+      new GeminiProvider(
+        "test-model",
+        baseUrl === undefined
+          ? { apiKey: "test-key" }
+          : { apiKey: "test-key", baseUrl },
+      ),
+    endpoint: geminiEndpoint,
+    translate: translateGeminiError,
+    timeoutError: (): Error =>
+      geminiTransportError("APIConnectionTimeoutError", "timed out"),
+    userAbortError: (): Error =>
+      geminiTransportError("APIUserAbortError", "aborted"),
+    connectionError: (): Error =>
+      geminiTransportError("APIConnectionError", "fetch failed"),
+    statusError: geminiStatusError,
+  },
 ] as const;
 
-const GEMINI_PROVIDER = {
-  provider: "gemini",
-  build: (baseUrl?: string): Provider =>
-    new GeminiProvider(
-      "test-model",
-      baseUrl === undefined
-        ? { apiKey: "test-key" }
-        : { apiKey: "test-key", baseUrl },
-    ),
-  endpoint: geminiEndpoint,
-  translate: translateGeminiError,
-  timeoutError: (): Error =>
-    geminiTransportError("APIConnectionTimeoutError", "timed out"),
-  userAbortError: (): Error =>
-    geminiTransportError("APIUserAbortError", "aborted"),
-  connectionError: (): Error =>
-    geminiTransportError("APIConnectionError", "fetch failed"),
-  statusError: geminiStatusError,
-} as const;
-
-const ALL_PROVIDERS = [...PROVIDERS, GEMINI_PROVIDER] as const;
-
 describe("provider error translation over HTTP", () => {
-  it.each(ALL_PROVIDERS)(
+  it.each(PROVIDERS)(
     "$provider maps HTTP status errors and preserves status and body",
     async ({ build, endpoint }) => {
       for (const { status, expected } of STATUS_CASES) {
@@ -155,7 +152,7 @@ describe("provider error translation over HTTP", () => {
     },
   );
 
-  it.each(ALL_PROVIDERS)(
+  it.each(PROVIDERS)(
     "$provider maps transport failures to connection errors with a cause",
     async ({ build }) => {
       // An unresolvable origin fails before any handler could reply; no
@@ -195,7 +192,7 @@ describe("provider error translation over HTTP", () => {
 });
 
 describe("provider error translators", () => {
-  it.each(ALL_PROVIDERS)(
+  it.each(PROVIDERS)(
     "$provider maps its SDK error classes onto SDK errors",
     ({
       build,
