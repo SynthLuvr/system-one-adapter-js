@@ -11,8 +11,8 @@ Useful for comparing TypeSafe against an LLM on cost/speed/intelligence.
 npm install system-one-adapter
 ```
 
-Both provider SDKs ship as dependencies: OpenAI-compatible endpoints and
-native Anthropic.
+The provider SDKs ship as dependencies: OpenAI-compatible endpoints,
+native Anthropic, and native Gemini.
 
 ## Usage
 
@@ -32,7 +32,7 @@ const client = new SystemOneAdapterClient({
 const response = await client.systemOne({
   state: "This book was a delight to read.",
   questions: { positive: noul("The book review is positive.") },
-  provider: "openai", // "openai", "anthropic", "claude_code", or "laya"
+  provider: "openai", // "openai", "anthropic", "gemini", "claude_code", or "laya"
   model: "gpt-4o-mini",
 });
 ```
@@ -62,6 +62,27 @@ structured output and JSON mode for prompted output. Custom endpoints
 select explicitly, for example when using an OpenAI proxy. Responses are
 requested with `store: false`; corrective retries send the conversation
 history with each request.
+
+Gemini uses the Interactions API. Structured mode sets `response_format`
+to a JSON Schema; prompted mode leaves the schema in the system prompt.
+Requests use `store: false` and send the full conversation on corrective
+retries. The SDK’s own retries are disabled, so the adapter’s `retry`
+policy owns every attempt. Credentials come from `GEMINI_API_KEY` or
+`GOOGLE_API_KEY`, or `apiKey` on `GeminiProvider`:
+
+``` ts
+const response = await client.systemOne({
+  state,
+  questions,
+  provider: "gemini",
+  model: "gemini-3.8-flash",
+});
+```
+
+Unlike the OpenAI-compatible endpoints, a Gemini response must report
+token usage: one without it raises a `TypeSafeError` naming the
+omission, without consuming retries — as does any interaction `status`
+other than `"completed"`.
 
 For larger Anthropic evaluations, configure the output token limit on
 the provider (default: 4,096 tokens):

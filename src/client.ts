@@ -416,7 +416,7 @@ interface SystemOneAdapterClientOptions {
   retry?: Partial<RetryPolicy>;
   /**
    * Default provider for model names: `"openai"`, `"anthropic"`,
-   * `"claude_code"`, or `"laya"`.
+   * `"gemini"`, `"claude_code"`, or `"laya"`.
    */
   provider?: ProviderName;
   /** Default model name or caller-owned provider instance. */
@@ -535,7 +535,8 @@ class SystemOneAdapterClient {
     if (name === undefined)
       throw new Error(
         "A provider is required: set provider='openai', 'anthropic', " +
-          "'claude_code', or 'laya', or pass a provider instance as the model.",
+          "'gemini', 'claude_code', or 'laya', or pass a provider instance " +
+          "as the model.",
       );
     const key = `${name}:${modelValue}`;
     let provider = this.#ownedProviders.get(key);

@@ -5,6 +5,7 @@ import {
   buildProvider,
   ClaudeCodeProvider,
   choice,
+  GeminiProvider,
   LAYA_MODELS,
   LayaProvider,
   Message,
@@ -16,6 +17,8 @@ import {
   TypeSafeError,
 } from "../index.js";
 import {
+  geminiEndpoint,
+  geminiPayload,
   openAIResponsesEndpoint,
   openAIResponsesPayload,
   server,
@@ -36,6 +39,9 @@ describe("public API", () => {
     );
     expect(buildProvider("anthropic", "test-model")).toBeInstanceOf(
       AnthropicProvider,
+    );
+    expect(buildProvider("gemini", "gemini-3.8-flash")).toBeInstanceOf(
+      GeminiProvider,
     );
     expect(buildProvider("claude_code", "test-model")).toBeInstanceOf(
       ClaudeCodeProvider,
@@ -92,6 +98,27 @@ describe("public API", () => {
     });
     expect(response.nouls.positive?.noul).toBe(0.75);
     expect(endpoint.requests.length).toBe(1);
+    await client.close();
+  });
+
+  it("builds and closes an owned gemini provider from constructor defaults", async () => {
+    const interactions = geminiEndpoint(() =>
+      geminiPayload('{"answers":{"positive":0.75}}'),
+    );
+    server.use(interactions.handler);
+    const client = new SystemOneAdapterClient({
+      structuredOutputs: true,
+      llmAnswerMode: "probabilities",
+      provider: "gemini",
+      model: "gemini-3.8-flash",
+    });
+    const response = await client.systemOne({
+      state: "A lovely book.",
+      questions: { positive: noul("The review is positive.") },
+    });
+    expect(response.nouls.positive?.noul).toBe(0.75);
+    expect(response.model).toBe("gemini-3.8-flash");
+    expect(interactions.requests.length).toBe(1);
     await client.close();
   });
 });

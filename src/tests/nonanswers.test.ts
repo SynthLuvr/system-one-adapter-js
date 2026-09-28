@@ -2,13 +2,16 @@ import { type Questions, TypeSafeError } from "@typesafe-ai/sdk";
 import { describe, expect, it } from "vitest";
 import { SystemOneAdapterClient } from "../client.js";
 import { AnthropicProvider } from "../providers/anthropic.js";
-import type { LlmAttempt } from "../providers/base.js";
+import type { LlmAttempt, Provider } from "../providers/base.js";
+import { GeminiProvider } from "../providers/gemini.js";
 import { OpenAIProvider } from "../providers/openai.js";
 import type { AdapterDebug, SystemOneResponse } from "../response.js";
 import {
   ANSWER,
   anthropicEndpoint,
   anthropicPayload,
+  geminiEndpoint,
+  geminiPayload,
   openAIChatEndpoint,
   openAIChatPayload,
   openAIResponsesEndpoint,
@@ -67,9 +70,13 @@ const singleAttempt = (
   return attempt;
 };
 
+/** A Gemini provider against the recorded Interactions endpoint. */
+const geminiProvider = (): GeminiProvider =>
+  new GeminiProvider("gemini-3.8-flash", { apiKey: "test-key" });
+
 /** A client whose retry budgets a non-answer must not consume. */
 const budgetedClient = (
-  model: OpenAIProvider | AnthropicProvider,
+  model: Provider,
   structured: boolean,
 ): SystemOneAdapterClient =>
   new SystemOneAdapterClient({
@@ -357,6 +364,133 @@ describe("openai responses refusals", () => {
         expect(attempt.debug_info.error).toContain("refusal");
       }
       expect(responses.requests.length).toBe(2);
+    },
+  );
+});
+
+describe("gemini interaction statuses", () => {
+  it.each([
+    "completed",
+    "in_progress",
+    "requires_action",
+    "failed",
+    "cancelled",
+    "incomplete",
+    "budget_exceeded",
+    "queued",
+  ])("treat status %s as an answer only when completed", async (status) => {
+    const interactions = geminiEndpoint(() =>
+      geminiPayload(ANSWER({ positive: true }), { status }),
+    );
+    server.use(interactions.handler);
+    const provider = geminiProvider();
+    const completed = status === "completed";
+
+    for (const structured of [false, true]) {
+      const outcome = await evaluate(
+        budgetedClient(provider, structured),
+        QUESTIONS,
+      );
+      if (completed) expect(outcome.response?.nouls.positive?.noul).toBe(1);
+      else
+        expect(outcome.error?.message).toBe(
+          `Gemini response did not complete: ${status}.`,
+        );
+      expect(interactions.requests.length).toBe(structured ? 2 : 1);
+
+      const attempt = singleAttempt(debugOf(outcome), interactions);
+      const response = attempt.llm_response as { status: string };
+      expect(response.status).toBe(status);
+      expect(attempt.debug_info.finish_reason).toBe(status);
+      expect("error" in attempt.debug_info).toBe(!completed);
+    }
+  });
+
+  it("reports an empty status as unknown", async () => {
+    const interactions = geminiEndpoint(() =>
+      geminiPayload(ANSWER({ positive: true }), { status: "" }),
+    );
+    server.use(interactions.handler);
+    const outcome = await evaluate(
+      budgetedClient(geminiProvider(), true),
+      QUESTIONS,
+    );
+
+    expect(outcome.error?.message).toBe(
+      "Gemini response did not complete: unknown.",
+    );
+    singleAttempt(debugOf(outcome), interactions);
+  });
+
+  it("reports recorded interaction errors as the failure reason", async () => {
+    const errors = [{ code: "500", message: "generation failed" }];
+    const interactions = geminiEndpoint(() =>
+      geminiPayload(ANSWER({ positive: true }), { status: "failed", errors }),
+    );
+    server.use(interactions.handler);
+    const outcome = await evaluate(
+      budgetedClient(geminiProvider(), true),
+      QUESTIONS,
+    );
+
+    expect(outcome.error?.message).toContain("did not complete");
+    expect(outcome.error?.message).toContain("generation failed");
+    const attempt = singleAttempt(debugOf(outcome), interactions);
+    expect(attempt.llm_response).toMatchObject({ status: "failed", errors });
+  });
+});
+
+describe("gemini missing token usage", () => {
+  it.each(["omitted", "null", "missing_input", "missing_output"])(
+    "rejects %s usage as an incomplete answer",
+    async (usageCase) => {
+      const usage: Record<string, number> = {
+        total_input_tokens: 12,
+        total_output_tokens: 7,
+      };
+      if (usageCase === "missing_input") delete usage.total_input_tokens;
+      if (usageCase === "missing_output") delete usage.total_output_tokens;
+      const payload = geminiPayload(ANSWER({ positive: true }));
+      if (usageCase === "omitted") delete payload.usage;
+      else payload.usage = usageCase === "null" ? null : usage;
+      const interactions = geminiEndpoint(() => payload);
+      server.use(interactions.handler);
+
+      const outcome = await evaluate(
+        budgetedClient(geminiProvider(), true),
+        QUESTIONS,
+      );
+
+      expect(outcome.error?.message).toBe("Gemini response omitted usage.");
+      expect(interactions.requests.length).toBe(1);
+      singleAttempt(debugOf(outcome), interactions);
+    },
+  );
+
+  it.each(["present", "zero"])(
+    "preserves reported %s usage counts",
+    async (usageCase) => {
+      const usage = {
+        total_input_tokens: usageCase === "zero" ? 0 : 12,
+        total_output_tokens: usageCase === "zero" ? 0 : 7,
+      };
+      const interactions = geminiEndpoint(() =>
+        geminiPayload(ANSWER({ positive: true }), { usage }),
+      );
+      server.use(interactions.handler);
+      const response = await budgetedClient(geminiProvider(), true).systemOne({
+        state: STATE,
+        questions: QUESTIONS,
+      });
+
+      expect(response.nouls.positive?.noul).toBe(1);
+      expect(response.usage.input_tokens).toBe(usage.total_input_tokens);
+      expect(response.usage.output_tokens).toBe(usage.total_output_tokens);
+      expect(response.usage.input_tokens_total).toBe(usage.total_input_tokens);
+      expect(response.usage.output_tokens_total).toBe(
+        usage.total_output_tokens,
+      );
+      expect(interactions.requests.length).toBe(1);
     },
   );
 });

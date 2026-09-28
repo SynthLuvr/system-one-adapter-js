@@ -58,6 +58,10 @@ const openAIChatEndpoint = (reply: Reply): RecordedEndpoint =>
 const anthropicEndpoint = (reply: Reply): RecordedEndpoint =>
   postEndpoint("/v1/messages", reply);
 
+/** A recorded `POST /v1beta/interactions` endpoint, the Gemini Interactions API. */
+const geminiEndpoint = (reply: Reply): RecordedEndpoint =>
+  postEndpoint("/v1beta/interactions", reply);
+
 /** A completed OpenAI Responses API payload carrying `text`. */
 const openAIResponsesPayload = (
   text: string,
@@ -117,6 +121,22 @@ const anthropicPayload = (
   ...overrides,
 });
 
+/**
+ * A completed Gemini Interactions payload carrying `text`. The SDK derives
+ * `output_text` from the model-output step; the wire never carries it.
+ */
+const geminiPayload = (
+  text: string,
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> => ({
+  id: "interaction-test",
+  status: "completed",
+  model: "gemini-3.8-flash",
+  steps: [{ type: "model_output", content: [{ type: "text", text }] }],
+  usage: { total_input_tokens: 12, total_output_tokens: 7, total_tokens: 19 },
+  ...overrides,
+});
+
 /** An HTTP error response with a provider-shaped JSON error body. */
 const jsonResponseError = (
   status: number,
@@ -138,6 +158,8 @@ export {
   ANSWER,
   anthropicEndpoint,
   anthropicPayload,
+  geminiEndpoint,
+  geminiPayload,
   jsonResponseError,
   openAIChatEndpoint,
   openAIChatPayload,

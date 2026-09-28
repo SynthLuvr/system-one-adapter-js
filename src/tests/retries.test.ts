@@ -2,12 +2,14 @@ import { InternalServerError } from "@typesafe-ai/sdk";
 import { describe, expect, it } from "vitest";
 import { SystemOneAdapterClient } from "../client.js";
 import { AnthropicProvider } from "../providers/anthropic.js";
+import { GeminiProvider } from "../providers/gemini.js";
 import type { Provider } from "../providers/index.js";
 import { OpenAIProvider } from "../providers/openai.js";
 import { type AdapterDebug } from "../response.js";
 import {
   ANSWER,
   anthropicEndpoint,
+  geminiEndpoint,
   jsonResponseError,
   openAIChatEndpoint,
   openAIResponsesEndpoint,
@@ -18,24 +20,27 @@ import {
 
 /** An endpoint and provider pair that always fails with a 503. */
 const failingProvider = (
-  name: "openai" | "anthropic",
+  name: "openai" | "anthropic" | "gemini",
 ): {
   provider: Provider;
   requests: Record<string, unknown>[];
 } => {
-  const endpoint =
-    name === "openai"
-      ? openAIChatEndpoint(() => jsonResponseError(503))
-      : anthropicEndpoint(() => jsonResponseError(503));
-  server.use(endpoint.handler);
-  const provider =
-    name === "openai"
-      ? new OpenAIProvider("test-model", {
-          apiKey: "test-key",
-          api: "chat_completions",
-        })
-      : new AnthropicProvider("test-model", { apiKey: "test-key" });
-  return { provider, requests: endpoint.requests };
+  const reply = () => jsonResponseError(503);
+  const endpoints = {
+    openai: openAIChatEndpoint(reply),
+    anthropic: anthropicEndpoint(reply),
+    gemini: geminiEndpoint(reply),
+  } as const;
+  const providers = {
+    openai: new OpenAIProvider("test-model", {
+      apiKey: "test-key",
+      api: "chat_completions",
+    }),
+    anthropic: new AnthropicProvider("test-model", { apiKey: "test-key" }),
+    gemini: new GeminiProvider("test-model", { apiKey: "test-key" }),
+  } as const;
+  server.use(endpoints[name].handler);
+  return { provider: providers[name], requests: endpoints[name].requests };
 };
 
 describe("provider retry budgets", () => {
@@ -44,6 +49,8 @@ describe("provider retry budgets", () => {
     ["openai", 1],
     ["anthropic", 0],
     ["anthropic", 1],
+    ["gemini", 0],
+    ["gemini", 1],
   ] as const)(
     "%s retry policy controls HTTP attempts (budget %d)",
     async (name, retryBudget) => {

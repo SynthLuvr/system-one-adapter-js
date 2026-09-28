@@ -16,6 +16,7 @@
     "llm",
     "openai",
     "anthropic",
+    "gemini",
     "structured-outputs",
     "evaluation",
     "arktype"
@@ -42,6 +43,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.127.0",
+    "@google/genai": "^2.24.0",
     "@typesafe-ai/sdk": "^0.6.0",
     "arktype": "^2.2.3",
     "laya-ts": "github:SynthLuvr/laya#laya-ts-v0.1.0&path:laya-ts",
