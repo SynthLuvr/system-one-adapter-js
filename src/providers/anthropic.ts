@@ -20,6 +20,7 @@ import {
   parsePayload,
   recordRequest,
   recordResponse,
+  rejectIncomplete,
   systemPrompt,
 } from "./base.js";
 
@@ -63,7 +64,7 @@ const payloadTypes = scope({
   },
 }).export();
 
-/** Parse one Messages API payload, rejecting truncated output. */
+/** Parse one Messages API payload, rejecting incomplete output. */
 const anthropicResult = (response: unknown): ProviderResult => {
   const payload = parsePayload(
     () => payloadTypes.MessagesPayload(response),
@@ -75,6 +76,11 @@ const anthropicResult = (response: unknown): ProviderResult => {
       "Anthropic response was truncated at the output token limit. " +
         "Increase max_tokens on AnthropicProvider, or request fewer questions.",
     );
+  rejectIncomplete(
+    payload.stop_reason,
+    ["end_turn", "stop_sequence"],
+    "Anthropic response",
+  );
   const text = payload.content
     .filter((block) => block.type === "text")
     .map((block) => block.text ?? "")

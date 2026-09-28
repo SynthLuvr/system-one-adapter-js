@@ -78,7 +78,13 @@ const response = await client.systemOne({
 
 A response that reaches the limit throws a `TypeSafeError` with
 instructions to increase `maxTokens` or request fewer questions; it does
-not consume malformed-output retries.
+not consume malformed-output retries. The same applies to other
+incomplete generations and provider-declared refusals — any OpenAI chat
+`finish_reason` other than `"stop"` or `null`, any Anthropic
+`stop_reason` other than `"end_turn"`, `"stop_sequence"`, or `null`, and
+any Responses-API refusal content part raise a `TypeSafeError` naming
+the reason, without consuming retries, preserving the full provider
+response in `error.debug.llm_attempts`.
 
 Evaluations can also run through the Claude Code CLI, using its own
 login for access. Each request spawns one headless process —
@@ -196,6 +202,11 @@ typed views (`nouls`, `scores`, `choices`) — with two additions:
   `latency`.
 - `response.debug` holds `llm_attempts`, `retry_reasons`, and
   probability-normalization diagnostics.
+
+OpenAI-compatible endpoints and the Claude Code CLI may omit token
+usage. Unreported counts are `null`; the evaluation still succeeds. A
+cumulative token count is `null` if any attempt omitted that count.
+Reported counts, including zero, are preserved.
 
 `llm_attempts` records every provider call in order, including transient
 failures and malformed responses. Each entry contains a snapshot of

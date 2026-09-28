@@ -195,12 +195,21 @@ const convertLlmAnswer = (
   };
 };
 
+/**
+ * Add token counts, where any unreported (`null`) count makes the sum
+ * `null`; reported counts, including zero, keep adding up.
+ */
+const addTokens = (
+  total: number | null,
+  tokens: number | null,
+): number | null => (total === null || tokens === null ? null : total + tokens);
+
 /** State shared by one evaluation's provider attempts. */
 class EvaluationRun {
   readonly retryReasons: RetryReason[] = [];
   readonly llmAttempts: LlmAttempt[] = [];
-  inputTokensTotal = 0;
-  outputTokensTotal = 0;
+  inputTokensTotal: number | null = 0;
+  outputTokensTotal: number | null = 0;
   nRetriesMalformedStructure = 0;
   readonly startedAt = performance.now();
 
@@ -216,8 +225,14 @@ class EvaluationRun {
   ) {}
 
   #record(result: ProviderResult): void {
-    this.inputTokensTotal += result.inputTokens;
-    this.outputTokensTotal += result.outputTokens;
+    this.inputTokensTotal = addTokens(
+      this.inputTokensTotal,
+      result.inputTokens,
+    );
+    this.outputTokensTotal = addTokens(
+      this.outputTokensTotal,
+      result.outputTokens,
+    );
   }
 
   async #request(

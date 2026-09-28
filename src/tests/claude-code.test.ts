@@ -146,6 +146,28 @@ describe("claude code CLI transport", () => {
     },
   );
 
+  it("reports unreported CLI usage as null, not zero", async () => {
+    const claude = await mockBin("claude", {
+      stdout: resultPayload({ usage: null }),
+    });
+    try {
+      const response = await new SystemOneAdapterClient({
+        structuredOutputs: false,
+        llmAnswerMode: "discrete",
+        model: claudeCodeProvider(),
+      }).systemOne({ state: "A book.", questions: QUESTIONS });
+
+      expect(response.nouls.positive?.noul).toBe(1);
+      expect(response.usage.input_tokens).toBe(null);
+      expect(response.usage.output_tokens).toBe(null);
+      expect(response.usage.input_tokens_total).toBe(null);
+      expect(response.usage.output_tokens_total).toBe(null);
+      expect(() => JSON.stringify(response.debug)).not.toThrow();
+    } finally {
+      claude();
+    }
+  });
+
   it("renders the corrective conversation for a retried request", async () => {
     const claude = claudeScript();
     try {

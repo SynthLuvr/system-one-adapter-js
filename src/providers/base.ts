@@ -13,11 +13,11 @@ interface Message {
   content: string;
 }
 
-/** The raw JSON payload a model returned and the tokens it cost. */
+/** The raw JSON payload a model returned, with possibly unreported usage. */
 interface ProviderResult {
   text: string;
-  inputTokens: number;
-  outputTokens: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
 }
 
 /**
@@ -138,6 +138,19 @@ const parsePayload = <t>(
   return payload;
 };
 
+/**
+ * Reject a provider-declared non-answer: a finish reason that is neither
+ * `null` nor one of `completeReasons`.
+ */
+const rejectIncomplete = (
+  finishReason: string | null,
+  completeReasons: readonly string[],
+  description: string,
+): void => {
+  if (finishReason === null || completeReasons.includes(finishReason)) return;
+  throw new TypeSafeError(`${description} did not complete: ${finishReason}.`);
+};
+
 /** Record a thrown error on its attempt trace. */
 const recordFailure = (attempt: LlmAttempt, error: unknown): void => {
   attempt.debug_info.error =
@@ -211,6 +224,7 @@ export {
   parsePayload,
   recordRequest,
   recordResponse,
+  rejectIncomplete,
   renderMessages,
   systemPrompt,
   type TypedQuestions,

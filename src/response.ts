@@ -12,10 +12,17 @@ import type {
 import type { LlmAttempt } from "./providers/base.js";
 import type { ProbabilityDebug } from "./utils/probabilityNormalization.js";
 
-/** Token usage of the final attempt alongside cumulative retry accounting. */
-interface AdapterUsage extends Usage {
-  input_tokens_total: number;
-  output_tokens_total: number;
+/**
+ * Token usage of the final attempt alongside cumulative retry accounting.
+ * Unlike the SDK's `Usage`, counts are nullable: `input_tokens` and
+ * `output_tokens` are `null` when the final attempt went unreported, and
+ * the `_total` counts are `null` once any attempt did.
+ */
+interface AdapterUsage extends Omit<Usage, "input_tokens" | "output_tokens"> {
+  input_tokens: number | null;
+  output_tokens: number | null;
+  input_tokens_total: number | null;
+  output_tokens_total: number | null;
   n_retries: number;
   n_retries_malformed_structure: number;
   latency: number;
