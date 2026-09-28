@@ -152,12 +152,15 @@ const claudeCodeResult = (stdout: string): ProviderResult => {
   return {
     text: payload.result ?? "",
     // The CLI bills its own system prompt as a cache write or read, so the
-    // honest input figure adds those tokens to the request's input tokens.
+    // honest input figure adds those tokens to the request's input tokens;
+    // counts the CLI did not report stay null rather than zero.
     inputTokens:
-      (usage?.input_tokens ?? 0) +
-      (usage?.cache_creation_input_tokens ?? 0) +
-      (usage?.cache_read_input_tokens ?? 0),
-    outputTokens: usage?.output_tokens ?? 0,
+      usage?.input_tokens == null
+        ? null
+        : usage.input_tokens +
+          (usage.cache_creation_input_tokens ?? 0) +
+          (usage.cache_read_input_tokens ?? 0),
+    outputTokens: usage?.output_tokens ?? null,
   };
 };
 

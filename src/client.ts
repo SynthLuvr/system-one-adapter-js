@@ -199,8 +199,8 @@ const convertLlmAnswer = (
 class EvaluationRun {
   readonly retryReasons: RetryReason[] = [];
   readonly llmAttempts: LlmAttempt[] = [];
-  inputTokensTotal = 0;
-  outputTokensTotal = 0;
+  inputTokensTotal: number | null = 0;
+  outputTokensTotal: number | null = 0;
   nRetriesMalformedStructure = 0;
   readonly startedAt = performance.now();
 
@@ -216,8 +216,16 @@ class EvaluationRun {
   ) {}
 
   #record(result: ProviderResult): void {
-    this.inputTokensTotal += result.inputTokens;
-    this.outputTokensTotal += result.outputTokens;
+    // A cumulative count is null once any attempt omitted that count;
+    // reported counts, including zero, keep adding up.
+    this.inputTokensTotal =
+      this.inputTokensTotal !== null && result.inputTokens !== null
+        ? this.inputTokensTotal + result.inputTokens
+        : null;
+    this.outputTokensTotal =
+      this.outputTokensTotal !== null && result.outputTokens !== null
+        ? this.outputTokensTotal + result.outputTokens
+        : null;
   }
 
   async #request(

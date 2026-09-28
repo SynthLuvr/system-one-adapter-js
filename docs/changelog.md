@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased
+
+Ported from upstream `system-one-adapter-python` v0.2.1 (`e1d4cc9`).
+
+### Bug Fixes
+
+- the OpenAI chat provider now rejects completions whose `finish_reason`
+  is anything other than `"stop"` or `null` (for example `length` or
+  `content_filter`) with a non-retryable `TypeSafeError` (“did not
+  complete: …”), instead of silently feeding possibly truncated or empty
+  text into decoding, where it burned the corrective malformed-output
+  retry budget and surfaced a misleading schema error
+- the Anthropic provider likewise rejects any `stop_reason` other than
+  `"end_turn"`, `"stop_sequence"`, or `null` (for example `refusal` or
+  `model_context_window_exceeded`), keeping the dedicated truncation
+  message for `max_tokens`
+- the OpenAI Responses provider now scans `response.output` for refusal
+  content parts and raises “was a refusal: …” even when a valid-looking
+  message is also present
+- like upstream, these provider-declared non-answers raise plain
+  `TypeSafeError`s that never consume the transient-retry or
+  corrective-retry budgets, while `error.debug.llm_attempts` keeps the
+  recorded request, full provider response, and finish reason
+
+### Features
+
+- OpenAI-compatible endpoints may omit token usage: missing or null
+  usage, or usage with missing/null count fields, no longer fails the
+  evaluation. `ProviderResult` counts are `number | null`;
+  `AdapterUsage` overrides the SDK’s non-nullable `Usage` with nullable
+  `input_tokens`/`output_tokens` and nullable cumulative
+  `input_tokens_total`/`output_tokens_total`, which are `null` once any
+  attempt omitted a count. Reported counts, including zero, are
+  preserved. The claude-code provider reports absent CLI usage as `null`
+  instead of coercing it to zero (laya’s deliberate zeros are unchanged)
+
 ## v0.5.0 (2026-09-23)
 
 ### Breaking Changes

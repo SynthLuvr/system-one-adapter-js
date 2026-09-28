@@ -63,7 +63,7 @@ const payloadTypes = scope({
   },
 }).export();
 
-/** Parse one Messages API payload, rejecting truncated output. */
+/** Parse one Messages API payload, rejecting incomplete output. */
 const anthropicResult = (response: unknown): ProviderResult => {
   const payload = parsePayload(
     () => payloadTypes.MessagesPayload(response),
@@ -74,6 +74,14 @@ const anthropicResult = (response: unknown): ProviderResult => {
     throw new TypeSafeError(
       "Anthropic response was truncated at the output token limit. " +
         "Increase max_tokens on AnthropicProvider, or request fewer questions.",
+    );
+  if (
+    payload.stop_reason !== "end_turn" &&
+    payload.stop_reason !== "stop_sequence" &&
+    payload.stop_reason !== null
+  )
+    throw new TypeSafeError(
+      `Anthropic response did not complete: ${payload.stop_reason}.`,
     );
   const text = payload.content
     .filter((block) => block.type === "text")

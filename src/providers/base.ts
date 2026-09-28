@@ -13,11 +13,11 @@ interface Message {
   content: string;
 }
 
-/** The raw JSON payload a model returned and the tokens it cost. */
+/** The raw JSON payload a model returned, with possibly unreported usage. */
 interface ProviderResult {
   text: string;
-  inputTokens: number;
-  outputTokens: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
 }
 
 /**

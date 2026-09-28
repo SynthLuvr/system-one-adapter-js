@@ -60,15 +60,24 @@ const payloadTypes = scope({
     "reason?": "string",
   },
   ResponsesUsage: {
-    input_tokens: "number",
-    output_tokens: "number",
+    "input_tokens?": "number|null",
+    "output_tokens?": "number|null",
+  },
+  ResponsesContentPart: {
+    type: "string",
+    "refusal?": "string",
+  },
+  ResponsesOutputItem: {
+    type: "string",
+    "content?": "ResponsesContentPart[]",
   },
   ResponsesPayload: {
     status: "string",
     "error?": "ResponsesError|null",
     "incomplete_details?": "IncompleteDetails|null",
+    output: "ResponsesOutputItem[]",
     output_text: "string",
-    "usage?": "ResponsesUsage",
+    "usage?": "ResponsesUsage|null",
   },
   ChatChoice: {
     message: {
@@ -77,14 +86,17 @@ const payloadTypes = scope({
     finish_reason: "string|null",
   },
   ChatUsage: {
-    prompt_tokens: "number",
-    completion_tokens: "number",
+    "prompt_tokens?": "number|null",
+    "completion_tokens?": "number|null",
   },
   ChatPayload: {
     choices: "ChatChoice[]",
-    usage: "ChatUsage",
+    "usage?": "ChatUsage|null",
   },
 }).export();
+
+/** One validated Responses API output item. */
+type ResponsesOutputItem = typeof payloadTypes.ResponsesOutputItem.infer;
 
 /** The `response_format` for Chat Completions, or none when prompted. */
 const responseFormat = (
@@ -127,6 +139,17 @@ const responsesRequest = (
   return params;
 };
 
+/** The refusal text of one Responses output, when the model refused. */
+const refusalText = (
+  output: readonly ResponsesOutputItem[],
+): string | undefined => {
+  for (const item of output)
+    if (item.type === "message")
+      for (const part of item.content ?? [])
+        if (part.type === "refusal") return part.refusal;
+  return undefined;
+};
+
 /** Parse one Responses API payload, rejecting unfinished responses. */
 const responsesResult = (response: unknown): ProviderResult => {
   const payload = parsePayload(
@@ -141,18 +164,17 @@ const responsesResult = (response: unknown): ProviderResult => {
       reason = payload.incomplete_details.reason ?? reason;
     throw new TypeSafeError(`OpenAI response did not complete: ${reason}.`);
   }
-  const usage = parsePayload(
-    () => payloadTypes.ResponsesUsage(payload.usage),
-    "OpenAI response usage",
-  );
+  const refusal = refusalText(payload.output);
+  if (refusal !== undefined)
+    throw new TypeSafeError(`OpenAI response was a refusal: ${refusal}`);
   return {
     text: payload.output_text,
-    inputTokens: usage.input_tokens,
-    outputTokens: usage.output_tokens,
+    inputTokens: payload.usage?.input_tokens ?? null,
+    outputTokens: payload.usage?.output_tokens ?? null,
   };
 };
 
-/** Parse one Chat Completions payload. */
+/** Parse one Chat Completions payload, rejecting unfinished completions. */
 const chatResult = (response: unknown): ProviderResult => {
   const payload = parsePayload(
     () => payloadTypes.ChatPayload(response),
@@ -160,10 +182,14 @@ const chatResult = (response: unknown): ProviderResult => {
   );
   const [choice] = payload.choices;
   recordResponse(response, { finishReason: choice.finish_reason });
+  if (choice.finish_reason !== "stop" && choice.finish_reason !== null)
+    throw new TypeSafeError(
+      `OpenAI chat completion did not complete: ${choice.finish_reason}.`,
+    );
   return {
     text: choice.message.content ?? "",
-    inputTokens: payload.usage.prompt_tokens,
-    outputTokens: payload.usage.completion_tokens,
+    inputTokens: payload.usage?.prompt_tokens ?? null,
+    outputTokens: payload.usage?.completion_tokens ?? null,
   };
 };
 
