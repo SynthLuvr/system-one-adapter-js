@@ -18,17 +18,38 @@ import {
   AnthropicProvider,
   translateAnthropicError,
 } from "../providers/anthropic.js";
+import { GeminiProvider, translateGeminiError } from "../providers/gemini.js";
 import type { Provider } from "../providers/index.js";
 import { OpenAIProvider, translateOpenAIError } from "../providers/openai.js";
 import {
   ANSWER,
   anthropicEndpoint,
+  geminiEndpoint,
   jsonResponseError,
   openAIResponsesEndpoint,
   openAIResponsesPayload,
   QUESTIONS,
   server,
 } from "./msw.js";
+
+/**
+ * A stand-in for one of the Gemini Interactions transport errors, whose
+ * classes `@google/genai` does not export; the SDK sets their `name`.
+ */
+const geminiTransportError = (name: string, message: string): Error => {
+  const error = new Error(message);
+  error.name = name;
+  return error;
+};
+
+/** A stand-in for a Gemini Interactions HTTP status error. */
+const geminiStatusError = (status: number): Error =>
+  Object.assign(new Error(`${status} boom`), {
+    name: "InternalServerError",
+    status,
+    error: { error: { message: "boom" } },
+    headers: new Headers(),
+  });
 
 const STATUS_CASES = [
   { status: 400, expected: BadRequestError },
@@ -87,8 +108,30 @@ const PROVIDERS = [
   },
 ] as const;
 
+const GEMINI_PROVIDER = {
+  provider: "gemini",
+  build: (baseUrl?: string): Provider =>
+    new GeminiProvider(
+      "test-model",
+      baseUrl === undefined
+        ? { apiKey: "test-key" }
+        : { apiKey: "test-key", baseUrl },
+    ),
+  endpoint: geminiEndpoint,
+  translate: translateGeminiError,
+  timeoutError: (): Error =>
+    geminiTransportError("APIConnectionTimeoutError", "timed out"),
+  userAbortError: (): Error =>
+    geminiTransportError("APIUserAbortError", "aborted"),
+  connectionError: (): Error =>
+    geminiTransportError("APIConnectionError", "fetch failed"),
+  statusError: geminiStatusError,
+} as const;
+
+const ALL_PROVIDERS = [...PROVIDERS, GEMINI_PROVIDER] as const;
+
 describe("provider error translation over HTTP", () => {
-  it.each(PROVIDERS)(
+  it.each(ALL_PROVIDERS)(
     "$provider maps HTTP status errors and preserves status and body",
     async ({ build, endpoint }) => {
       for (const { status, expected } of STATUS_CASES) {
@@ -112,7 +155,7 @@ describe("provider error translation over HTTP", () => {
     },
   );
 
-  it.each(PROVIDERS)(
+  it.each(ALL_PROVIDERS)(
     "$provider maps transport failures to connection errors with a cause",
     async ({ build }) => {
       // An unresolvable origin fails before any handler could reply; no
@@ -152,7 +195,7 @@ describe("provider error translation over HTTP", () => {
 });
 
 describe("provider error translators", () => {
-  it.each(PROVIDERS)(
+  it.each(ALL_PROVIDERS)(
     "$provider maps its SDK error classes onto SDK errors",
     ({
       build,

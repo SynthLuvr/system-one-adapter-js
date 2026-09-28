@@ -35,6 +35,20 @@ Ported from upstream `system-one-adapter-python` v0.2.1 (`e1d4cc9`).
   attempt omitted a count. Reported counts, including zero, are
   preserved. The claude-code provider reports absent CLI usage as `null`
   instead of coercing it to zero (laya’s deliberate zeros are unchanged)
+- new `gemini` provider evaluates through the native Gemini Interactions
+  API, backed by the `@google/genai` SDK: named with
+  `provider: "gemini"` (or constructed directly as `GeminiProvider`),
+  structured mode sends the answer schema as a JSON-Schema
+  `response_format` while prompted mode keeps it in the system prompt,
+  requests use `store: false` and carry the full conversation on
+  corrective retries, and the SDK’s own retries are disabled so the
+  adapter’s `RetryPolicy` owns every attempt; credentials resolve from
+  `apiKey` or the SDK’s `GEMINI_API_KEY`/`GOOGLE_API_KEY` environment
+  variables, and transport failures map onto the SDK error classes with
+  their status, headers, and body preserved — unlike the
+  OpenAI-compatible endpoints, a Gemini response must report token
+  usage, and any interaction `status` other than `"completed"` raises a
+  non-retryable `TypeSafeError` naming the status or the recorded errors
 
 ## v0.5.0 (2026-09-23)
 

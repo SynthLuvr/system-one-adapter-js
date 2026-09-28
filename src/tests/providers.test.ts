@@ -2,6 +2,7 @@ import { TypeSafeError } from "@typesafe-ai/sdk";
 import { describe, expect, it } from "vitest";
 import { SystemOneAdapterClient } from "../client.js";
 import { AnthropicProvider } from "../providers/anthropic.js";
+import { GeminiProvider } from "../providers/gemini.js";
 import type { Message, ProviderRequestOptions } from "../providers/index.js";
 import { type OpenAIApi, OpenAIProvider } from "../providers/openai.js";
 import { type AdapterDebug } from "../response.js";
@@ -9,6 +10,8 @@ import {
   ANSWER,
   anthropicEndpoint,
   anthropicPayload,
+  geminiEndpoint,
+  geminiPayload,
   openAIChatEndpoint,
   openAIChatPayload,
   openAIResponsesEndpoint,
@@ -444,5 +447,134 @@ describe("anthropic messages transport", () => {
     expect(() => anthropicProvider({ maxTokens })).toThrow(
       "max_tokens must be > 0",
     );
+  });
+});
+
+describe("gemini interactions transport", () => {
+  /** A Gemini provider, built like production code would. */
+  const geminiProvider = (): GeminiProvider =>
+    new GeminiProvider("gemini-3.8-flash", { apiKey: "test-key" });
+
+  it.each([false, true])(
+    "carries corrections and usage end to end (structured: %s)",
+    async (structured) => {
+      const malformed = '{"answers":';
+      const interactions = geminiEndpoint((_body, index) =>
+        index === 0
+          ? geminiPayload(malformed)
+          : geminiPayload(ANSWER({ positive: true })),
+      );
+      server.use(interactions.handler);
+      const response = await new SystemOneAdapterClient({
+        structuredOutputs: structured,
+        llmAnswerMode: "discrete",
+        nRetryMalformedStructure: 1,
+        model: geminiProvider(),
+      }).systemOne({ state: "A delightful book.", questions: QUESTIONS });
+
+      expect(response.nouls.positive?.noul).toBe(1);
+      expect(response.usage.input_tokens).toBe(12);
+      expect(response.usage.output_tokens).toBe(7);
+      expect(response.usage.input_tokens_total).toBe(24);
+      expect(response.usage.output_tokens_total).toBe(14);
+      expect(response.usage.n_retries).toBe(0);
+      expect(response.usage.n_retries_malformed_structure).toBe(1);
+      const attempts = response.debug.llm_attempts;
+      expect(attempts.length).toBe(2);
+      expect(attempts.map((attempt) => attempt.request)).toEqual(
+        interactions.requests,
+      );
+
+      const [first] = interactions.requests as {
+        store: boolean;
+        system_instruction: string;
+        response_format?: {
+          type: string;
+          mime_type: string;
+          schema: {
+            $defs: Record<string, { properties: Record<string, unknown> }>;
+          };
+        };
+      }[];
+      expect(first.store).toBe(false);
+      expect(first.system_instruction).toMatch(/^Evaluate every question/);
+      if (structured) {
+        expect(first.response_format?.type).toBe("text");
+        expect(first.response_format?.mime_type).toBe("application/json");
+        expect(
+          first.response_format?.schema.$defs.TypeSafeAnswers.properties
+            .positive,
+        ).toBeDefined();
+      } else expect("response_format" in first).toBe(false);
+
+      // The corrective retry sends the full conversation: the malformed
+      // model output, then the correction request, as input steps.
+      const last = interactions.requests.at(-1) as {
+        input: { type: string; content: { type: string; text: string }[] }[];
+      };
+      expect(last.input.at(-2)).toEqual({
+        type: "model_output",
+        content: [{ type: "text", text: malformed }],
+      });
+      expect(last.input.at(-1)?.type).toBe("user_input");
+      expect(last.input.at(-1)?.content[0].text).toContain(
+        "previous response did not match",
+      );
+      for (const attempt of attempts) {
+        expect(attempt.debug_info.api).toBe("interactions");
+        expect(attempt.debug_info.finish_reason).toBe("completed");
+        expect("error" in attempt.debug_info).toBe(false);
+      }
+      expect(() => JSON.stringify(response.debug)).not.toThrow();
+    },
+  );
+
+  it("sends the document as the first user input step", async () => {
+    const interactions = geminiEndpoint(() =>
+      geminiPayload(ANSWER({ positive: true })),
+    );
+    server.use(interactions.handler);
+    await new SystemOneAdapterClient({
+      structuredOutputs: true,
+      llmAnswerMode: "discrete",
+      model: geminiProvider(),
+    }).systemOne({ state: "A delightful book.", questions: QUESTIONS });
+
+    const body = interactions.requests[0] as {
+      model: string;
+      input: { type: string; content: { text: string }[] }[];
+    };
+    expect(body.model).toBe("gemini-3.8-flash");
+    expect(body.input).toHaveLength(1);
+    expect(body.input[0]).toEqual({
+      type: "user_input",
+      content: [
+        { type: "text", text: expect.stringContaining("A delightful book.") },
+      ],
+    });
+  });
+
+  it("treats an interaction without model output as empty text", async () => {
+    // A completed interaction may carry no model-output step, in which case
+    // the SDK derives no `output_text`; the empty text is a malformed answer
+    // that consumes the corrective budget, not a non-answer.
+    const interactions = geminiEndpoint((_body, index) =>
+      index === 0
+        ? geminiPayload("", { steps: [] })
+        : geminiPayload(ANSWER({ positive: true })),
+    );
+    server.use(interactions.handler);
+    const response = await new SystemOneAdapterClient({
+      structuredOutputs: true,
+      llmAnswerMode: "discrete",
+      nRetryMalformedStructure: 1,
+      model: geminiProvider(),
+    }).systemOne({ state: "A delightful book.", questions: QUESTIONS });
+
+    expect(response.nouls.positive?.noul).toBe(1);
+    expect(response.usage.n_retries_malformed_structure).toBe(1);
+    expect(interactions.requests.length).toBe(2);
+    const [first] = response.debug.llm_attempts;
+    expect(first.llm_response).not.toHaveProperty("output_text");
   });
 });

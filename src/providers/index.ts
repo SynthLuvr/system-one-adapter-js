@@ -9,6 +9,7 @@ import {
   ClaudeCodeProvider,
   type ClaudeCodeProviderOptions,
 } from "./claude-code.js";
+import { GeminiProvider, type GeminiProviderOptions } from "./gemini.js";
 import { type LayaModel, LayaProvider } from "./laya.js";
 import { OpenAIProvider } from "./openai.js";
 
@@ -16,6 +17,7 @@ import { OpenAIProvider } from "./openai.js";
 const providerClasses = {
   openai: OpenAIProvider,
   anthropic: AnthropicProvider,
+  gemini: GeminiProvider,
   claude_code: ClaudeCodeProvider,
   laya: LayaProvider,
 } as const;
@@ -49,6 +51,8 @@ export {
   ClaudeCodeProvider,
   type ClaudeCodeProviderOptions,
   type ClosableProvider,
+  GeminiProvider,
+  type GeminiProviderOptions,
   OpenAIProvider,
   type Provider,
   type ProviderName,
